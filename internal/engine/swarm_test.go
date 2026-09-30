@@ -68,14 +68,15 @@ type fakeSeeder struct {
 	end chan struct{}
 
 	// mu guards what the assertions read back: the requests it saw, the blocks
-	// it served, the haves the client broadcast, any client protocol violation,
-	// and its live connections.
-	mu        sync.Mutex
-	requests  []req
-	served    []req
-	haves     []int
-	violation []string
-	conns     []*seederConn
+	// it served, the haves the client broadcast, the bitfield the client
+	// opened with, any client protocol violation, and its live connections.
+	mu         sync.Mutex
+	requests   []req
+	served     []req
+	haves      []int
+	clientBits []byte
+	violation  []string
+	conns      []*seederConn
 }
 
 type seederConn struct {
@@ -176,6 +177,20 @@ func (s *fakeSeeder) havesSeen() []int {
 	return append([]int(nil), s.haves...)
 }
 
+// clientBitsSeen is the bitfield the client opened its connection with, i.e.
+// the pieces it already held when it met this peer.
+func (s *fakeSeeder) clientBitsSeen() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.clientBits...)
+}
+
+// clientHas reports whether the client advertised piece in its opening
+// bitfield.
+func (s *fakeSeeder) clientHas(piece int) bool {
+	return wire.BitfieldHas(s.clientBitsSeen(), piece)
+}
+
 // sendHave announces a piece to every connection, standing in for a peer that
 // gains data after we first met it.
 func (s *fakeSeeder) sendHave(index int) {
@@ -235,6 +250,13 @@ func (s *fakeSeeder) serveConn(conn net.Conn) {
 		case wire.IDHave:
 			s.mu.Lock()
 			s.haves = append(s.haves, int(m.Index))
+			s.mu.Unlock()
+		case wire.IDBitfield:
+			// The client's opening bitfield is how it advertises the pieces it
+			// already holds, which is what a resumed download must not have
+			// re-fetched.
+			s.mu.Lock()
+			s.clientBits = append([]byte(nil), m.Bitfield...)
 			s.mu.Unlock()
 		case wire.IDInterested:
 			if !interested && !choked {

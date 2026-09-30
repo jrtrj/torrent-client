@@ -158,6 +158,14 @@ func (e *Engine) connectedLocked(ev event) {
 		piece:     -1,
 		bits:      wire.NewBitfield(e.pieceCount),
 	}
+	// Advertise everything we already hold in one bitfield frame — the
+	// standard single-frame form of "have" for every held piece. A peer we
+	// meet after a resume therefore knows those pieces are not missing, and a
+	// fresh download sends nothing because nothing is held. The slice is
+	// copied because the write pump encodes it after this lock is dropped.
+	if e.haveCount > 0 {
+		ev.peer.push(wire.Message{ID: wire.IDBitfield, Bitfield: append([]byte(nil), e.have...)})
+	}
 	e.logf("engine: connected to %s", ev.addr)
 }
 
@@ -320,6 +328,9 @@ func (e *Engine) verifyPieceLocked(ps *pieceState) {
 	wire.BitfieldSet(e.have, ps.index)
 	e.haveCount++
 	e.bytesDone += ps.size
+	// A verified piece is what the resume sidecar records, so the state is
+	// dirtied here and written by the scheduler's next pass.
+	e.stateDirty = true
 	e.logf("engine: piece %d/%d verified (%d/%d bytes)", ps.index+1, e.pieceCount, e.bytesDone, e.meta.TotalLength())
 
 	for _, p := range e.peers {

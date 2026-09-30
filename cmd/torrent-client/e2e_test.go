@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +22,7 @@ import (
 
 	"torrent-client/internal/bencode"
 	"torrent-client/internal/metainfo"
+	"torrent-client/internal/state"
 	"torrent-client/internal/wire"
 )
 
@@ -753,4 +755,287 @@ func (r *recordedProcess) logText() string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// resumeFixture is a loopback swarm whose seeder is slow enough to interrupt a
+// download after the first piece verifies. The content is eight 64 KiB pieces,
+// so plenty of work remains after the interrupt.
+type resumeFixture struct {
+	clientBin   string
+	torrentPath string
+	meta        *metainfo.MetaInfo
+	payload     []byte
+	pieceLength int64
+	outPath     string
+	store       *state.Store
+	seeder      *recordedProcess
+	devtracker  *recordedProcess
+}
+
+func startResumeFixture(t *testing.T) *resumeFixture {
+	t.Helper()
+	root := moduleRoot(t)
+	binDir := t.TempDir()
+	devtrackerBin := buildBinary(t, root, binDir, "./cmd/devtracker")
+	seedBin := buildBinary(t, root, binDir, "./cmd/seed")
+	clientBin := buildBinary(t, root, binDir, "./cmd/torrent-client")
+
+	devtracker := startRecorded(t, devtrackerBin, "-addr", "127.0.0.1:0", "-interval", "1")
+	line := devtracker.waitFor(t, "listening on", 20*time.Second)
+	addr := strings.TrimSpace(line[strings.Index(line, "listening on ")+len("listening on "):])
+	announceURL := "http://" + addr + "/announce"
+
+	const pieceLength = 64 * 1024
+	payload := make([]byte, 8*pieceLength)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	srcPath := filepath.Join(workDir, "payload.bin")
+	if err := os.WriteFile(srcPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	torrentPath := filepath.Join(workDir, "payload.torrent")
+	writeTorrent(t, torrentPath, announceURL, "payload.bin", pieceLength, payload)
+
+	meta, err := metainfo.Load(torrentPath)
+	if err != nil {
+		t.Fatalf("metainfo.Load: %v", err)
+	}
+
+	// A per-block delay widens the transfer so it can be killed after the
+	// first piece verifies but well before the last.
+	seeder := startRecorded(t, seedBin, "-serve-delay", "25ms", torrentPath, srcPath)
+	seeder.waitFor(t, "seed: ready", 20*time.Second)
+
+	outPath := filepath.Join(t.TempDir(), "resumed.bin")
+	store := state.Open(outPath, meta.InfoHash, meta.Info.PieceLength, meta.TotalLength(), meta.PieceCount())
+	return &resumeFixture{
+		clientBin:   clientBin,
+		torrentPath: torrentPath,
+		meta:        meta,
+		payload:     payload,
+		pieceLength: pieceLength,
+		outPath:     outPath,
+		store:       store,
+		seeder:      seeder,
+		devtracker:  devtracker,
+	}
+}
+
+// waitForResume polls until the sidecar records at least one verified piece and
+// returns that set. The sidecar is written after each verified piece, so its
+// appearance also proves an unclean kill would keep that piece.
+func waitForResume(t *testing.T, store *state.Store, timeout time.Duration) map[int]bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		st, err := store.Load()
+		if err == nil {
+			held := map[int]bool{}
+			for i := 0; i < st.Pieces; i++ {
+				if wire.BitfieldHas(st.Have, i) {
+					held[i] = true
+				}
+			}
+			if len(held) > 0 {
+				return held
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("no resume sidecar with verified pieces appeared within %s", timeout)
+	return nil
+}
+
+// killAfterFirstPiece waits for the first verified piece and the sidecar that
+// records it, then SIGKILLs the client so it gets no chance to flush anything.
+func (f *resumeFixture) killAfterFirstPiece(t *testing.T, c *clientProc) map[int]bool {
+	t.Helper()
+	c.waitFor(t, "verified (", 60*time.Second)
+	held := waitForResume(t, f.store, 30*time.Second)
+	if err := c.cmd.Process.Kill(); err != nil {
+		t.Fatalf("SIGKILL the client: %v", err)
+	}
+	_ = c.wait()
+	return held
+}
+
+// runToCompletion runs a second client against the same torrent and output and
+// returns its stderr.
+func (f *resumeFixture) runToCompletion(t *testing.T) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, f.clientBin, f.torrentPath, f.outPath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("resumed client failed: %v\nstderr:\n%s", err, stderr.String())
+	}
+	return stderr.String()
+}
+
+// servedCounts maps each (piece, begin) the seeder answered to how many times
+// it answered it, across every run in the test.
+func (f *resumeFixture) servedCounts(t *testing.T) map[[2]uint32]int {
+	t.Helper()
+	counts := make(map[[2]uint32]int)
+	for _, b := range f.seeder.parseServed(t) {
+		counts[b.key]++
+	}
+	return counts
+}
+
+func totalBlocks(meta *metainfo.MetaInfo) int {
+	n := 0
+	for i := 0; i < meta.PieceCount(); i++ {
+		n += int((meta.PieceSize(i) + wire.BlockSize - 1) / wire.BlockSize)
+	}
+	return n
+}
+
+// TestEndToEndResumeAfterSIGKILL kills a real download mid-transfer, restarts
+// it, and proves both halves of resume: the output is byte-identical, and no
+// block of a piece the sidecar had already verified was served a second time —
+// the seeder's own block log is the evidence, not the client's word.
+func TestEndToEndResumeAfterSIGKILL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("end-to-end resume skipped in -short mode")
+	}
+	f := startResumeFixture(t)
+	c1 := startClient(t, f.clientBin, f.torrentPath, f.outPath)
+	held := f.killAfterFirstPiece(t, c1)
+	t.Logf("killed after %d verified piece(s)", len(held))
+
+	stderr2 := f.runToCompletion(t)
+	t.Logf("resumed client stderr:\n%s", stderr2)
+	if !strings.Contains(stderr2, "resume:") {
+		t.Fatalf("the resumed run did not restore state from the sidecar:\n%s", stderr2)
+	}
+	assertFileEquals(t, f.outPath, f.payload)
+
+	if _, err := f.store.Load(); !errors.Is(err, state.ErrNoState) {
+		t.Fatalf("sidecar survived a completed download: %v", err)
+	}
+
+	counts := f.servedCounts(t)
+	want := totalBlocks(f.meta)
+	if len(counts) != want {
+		t.Fatalf("the swarm served %d distinct blocks, want %d", len(counts), want)
+	}
+	checked := 0
+	for key, n := range counts {
+		if !held[int(key[0])] {
+			continue
+		}
+		checked++
+		if n != 1 {
+			t.Fatalf("block piece=%d begin=%d of an already-verified piece was served %d times, want 1", key[0], key[1], n)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no block of a held piece was served, so the resume proof is vacuous")
+	}
+	t.Logf("%d block(s) of already-verified pieces were served exactly once", checked)
+
+	if served := len(f.seeder.parseServed(t)); served >= 2*want {
+		t.Fatalf("the seeder served %d blocks, want fewer than %d: the whole download ran twice", served, 2*want)
+	}
+}
+
+// TestEndToEndResumeRefetchesTamperedPiece corrupts a verified piece on disk
+// after the kill while the sidecar still claims it. The resumed run must re-hash
+// what is on disk, reject the claim, re-fetch the piece, and still end
+// byte-identical: verify-then-trust, never blind trust.
+func TestEndToEndResumeRefetchesTamperedPiece(t *testing.T) {
+	if testing.Short() {
+		t.Skip("end-to-end resume skipped in -short mode")
+	}
+	f := startResumeFixture(t)
+	c1 := startClient(t, f.clientBin, f.torrentPath, f.outPath)
+	held := f.killAfterFirstPiece(t, c1)
+
+	tampered := -1
+	for i := range held {
+		if tampered == -1 || i < tampered {
+			tampered = i
+		}
+	}
+	off := int64(tampered) * f.pieceLength
+	fh, err := os.OpenFile(f.outPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open output: %v", err)
+	}
+	if _, err := fh.WriteAt([]byte{^f.payload[off]}, off); err != nil {
+		t.Fatalf("tamper output: %v", err)
+	}
+	if err := fh.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("corrupted piece %d at offset %d", tampered, off)
+
+	stderr2 := f.runToCompletion(t)
+	assertFileEquals(t, f.outPath, f.payload)
+	if !strings.Contains(stderr2, "dropped") {
+		t.Fatalf("the resumed run did not report dropping the tampered piece:\n%s", stderr2)
+	}
+
+	counts := f.servedCounts(t)
+	refetched := 0
+	for key, n := range counts {
+		if int(key[0]) != tampered {
+			continue
+		}
+		refetched++
+		if n < 2 {
+			t.Fatalf("tampered piece block begin=%d was served %d times, want at least 2 (the corrupt copy was trusted)", key[1], n)
+		}
+	}
+	if refetched == 0 {
+		t.Fatalf("no block of the tampered piece %d was ever served", tampered)
+	}
+}
+
+// TestEndToEndCleanShutdownFlushesAndAnnouncesStopped sends SIGINT to a live
+// download: the client must flush resume state, exit cleanly, and announce
+// stopped to the tracker within its bounded deadline.
+func TestEndToEndCleanShutdownFlushesAndAnnouncesStopped(t *testing.T) {
+	if testing.Short() {
+		t.Skip("end-to-end resume skipped in -short mode")
+	}
+	f := startResumeFixture(t)
+	c := startClient(t, f.clientBin, f.torrentPath, f.outPath)
+	c.waitFor(t, "verified (", 60*time.Second)
+	held := waitForResume(t, f.store, 30*time.Second)
+
+	if err := c.cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("SIGINT: %v", err)
+	}
+	if err := c.waitExit(t, 10*time.Second); err != nil {
+		t.Fatalf("interrupted client exited with %v, want 0\nlog:\n%s", err, c.logText())
+	}
+	if c.countLines("interrupted; resume state saved") == 0 {
+		t.Fatalf("the client did not report a clean interrupt:\n%s", c.logText())
+	}
+
+	st, err := f.store.Load()
+	if err != nil {
+		t.Fatalf("the resume state was not flushed on shutdown: %v", err)
+	}
+	for i := range held {
+		if !wire.BitfieldHas(st.Have, i) {
+			t.Fatalf("the flushed sidecar lost already-verified piece %d", i)
+		}
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(f.devtracker.logText(), `event="stopped"`) {
+			t.Log("dev tracker saw the stopped announce")
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the dev tracker never saw a stopped announce:\n%s", f.devtracker.logText())
 }

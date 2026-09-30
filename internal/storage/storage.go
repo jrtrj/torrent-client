@@ -73,5 +73,10 @@ func (s *Storage) ReadBlock(index int, begin, length uint32) ([]byte, error) {
 	return buf, nil
 }
 
+// Sync flushes every written piece to stable storage. The engine calls it on
+// shutdown so the resume sidecar, which is written after it, can never record
+// a piece whose bytes have not at least reached the kernel.
+func (s *Storage) Sync() error { return s.f.Sync() }
+
 // Close releases the underlying file.
 func (s *Storage) Close() error { return s.f.Close() }

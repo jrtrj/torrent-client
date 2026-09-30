@@ -16,6 +16,7 @@ import (
 	"torrent-client/internal/engine"
 	"torrent-client/internal/metainfo"
 	"torrent-client/internal/seed"
+	"torrent-client/internal/state"
 	"torrent-client/internal/storage"
 	"torrent-client/internal/tracker"
 )
@@ -92,7 +93,13 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	}
 	output := resolveOutput(cfg.output, meta.Info.Name)
 
-	// Ctrl-C cancels cleanly; the pieces already written stay on disk.
+	// The resume sidecar is keyed to this torrent's info-hash and this output
+	// path, so a leftover sidecar from another torrent or another output is
+	// never adopted. It lives beside the output as "<output>.resume".
+	resume := state.Open(output, meta.InfoHash, meta.Info.PieceLength, meta.TotalLength(), meta.PieceCount())
+
+	// Ctrl-C cancels cleanly; the pieces already written stay on disk and the
+	// resume sidecar keeps them for the next run.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -159,13 +166,17 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 			Log:      logf,
 			Uploaded: uploaded,
 			Seed:     cfg.seed,
+			Resume:   resume,
 		})
 		if source != nil {
 			source.setEngine(eng)
 		}
 		if err := eng.Run(ctx); err != nil {
 			if ctx.Err() != nil {
-				return fail(ctx.Err())
+				// Ctrl-C during the download: a clean stop, not a failure.
+				// The state flushed above is enough to resume next time.
+				fmt.Fprintf(stderr, "torrent-client: interrupted; resume state saved for %s\n", output)
+				return exitOK
 			}
 			logf("tracker %s failed: %v", announceURL, err)
 			lastErr = err

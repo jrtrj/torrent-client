@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"torrent-client/internal/metainfo"
+	"torrent-client/internal/state"
 	"torrent-client/internal/storage"
 	"torrent-client/internal/tracker"
 	"torrent-client/internal/wire"
@@ -80,6 +81,13 @@ type Config struct {
 	// upload listener is the caller's to run and outlives Run's return.
 	Seed bool
 
+	// Resume, when non-nil, makes the download resumable: the engine restores
+	// the verified pieces it records (re-checking each against the store) and
+	// persists every newly verified piece back to it. A nil Resume disables
+	// resumption, so the download always starts from nothing. The store is
+	// keyed to the torrent info-hash and the output path; see internal/state.
+	Resume *state.Store
+
 	// Log receives one line per milestone. A nil Log discards them. Calls are
 	// serialised, so a Log that is not goroutine-safe is still usable.
 	Log func(format string, args ...any)
@@ -98,9 +106,10 @@ type Config struct {
 // pending-piece state single-sourced, which is what rules out two workers on
 // the same piece and the "re-enqueue forever" spin.
 type Engine struct {
-	cfg   Config
-	meta  *metainfo.MetaInfo
-	store *storage.Storage
+	cfg    Config
+	meta   *metainfo.MetaInfo
+	store  *storage.Storage
+	resume *state.Store
 
 	pipelineDepth int
 	stallTimeout  time.Duration
@@ -114,6 +123,9 @@ type Engine struct {
 	have       []byte
 	haveCount  int
 	bytesDone  int64
+	// stateDirty is set when a piece verifies and cleared when the sidecar is
+	// written, so persistence tracks verified pieces rather than every event.
+	stateDirty bool
 	peers      map[string]*peerState
 	blacklist  map[string]bool
 	attempting map[string]bool
@@ -146,6 +158,7 @@ func New(cfg Config) *Engine {
 	e := &Engine{
 		cfg:           cfg,
 		meta:          cfg.Meta,
+		resume:        cfg.Resume,
 		pipelineDepth: cfg.PipelineDepth,
 		stallTimeout:  cfg.StallTimeout,
 		peers:         make(map[string]*peerState),
@@ -208,6 +221,13 @@ func (e *Engine) Run(ctx context.Context) error {
 	for i := range e.pieces {
 		e.pieces[i] = newPiece(i, meta.PieceSize(i))
 	}
+	// Resume restores pieces before the first announce, so the scheduler never
+	// asks any peer for a piece we already hold.
+	if e.resume != nil {
+		if err := e.restore(store); err != nil {
+			return err
+		}
+	}
 	e.events = make(chan event, eventBuffer)
 	e.dials = make(chan tracker.Peer, dialBuffer)
 	e.done = make(chan struct{})
@@ -227,7 +247,23 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 
 	if err := e.download(ctx, e.announceInterval(resp)); err != nil {
+		// Whatever ended the download — a signal, a no-progress trip, a
+		// storage failure — keep everything verified so far so the next run
+		// can resume. The sidecar is flushed last.
+		e.finalizeState()
+		if errors.Is(err, context.Canceled) {
+			// A user interrupt, not a failure: say goodbye to the tracker.
+			e.announceStopped()
+		}
 		return err
+	}
+
+	// The download is complete, so there is nothing left to resume: the
+	// sidecar is removed rather than left claiming an already-finished file.
+	if e.resume != nil {
+		if err := e.resume.Remove(); err != nil {
+			e.logf("engine: remove resume sidecar: %v", err)
+		}
 	}
 
 	if _, err := e.announce(ctx, tracker.EventCompleted); err != nil {
@@ -258,7 +294,7 @@ func (e *Engine) seedLoop(ctx context.Context, interval time.Duration) error {
 	for {
 		select {
 		case <-ctx.Done():
-			_, _ = e.announce(context.Background(), tracker.EventStopped)
+			e.announceStopped()
 			return nil
 		case <-ticker.C:
 			e.reannounce(ctx)
@@ -342,6 +378,10 @@ func (e *Engine) download(ctx context.Context, interval time.Duration) error {
 		if progressed {
 			lastProgress = time.Now()
 		}
+		// Persist on every pass: a piece that just verified marks the state
+		// dirty and is written before the loop waits again, so a kill here
+		// loses at most the pieces still in flight.
+		e.persist()
 		if time.Since(lastProgress) > noProgressTimeout {
 			e.mu.Lock()
 			got := e.bytesDone
