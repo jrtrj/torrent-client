@@ -4,8 +4,17 @@
 // place.
 //
 // Scope is serving, not a general-purpose server. There is no tit-for-tat
-// scoring, no rarest-first piece picking, and no rate limiting; the server
-// answers requests for exactly the pieces its Source reports as held.
+// scoring and no rarest-first piece picking; the server answers requests for
+// exactly the pieces its Source reports as held.
+//
+// Rate limit: an optional token bucket (ratelimit.Limiter) caps how fast the
+// server puts bytes on the wire. It is consulted before a reply is read from
+// disk and written, so a capped server holds no buffer and touches no disk for
+// a block it is not about to send. The wait is per connection and the request
+// loop is serial, so the extra requests of a peer that runs ahead of the cap
+// queue in that peer's own socket buffer (TCP backpressure) rather than in
+// ours; the bucket itself orders waiters by arrival, so no one peer can hold
+// the whole allowance. A nil Limiter — or one with a zero rate — is unlimited.
 //
 // Swarm gate: a Server is built for exactly one torrent, so the handshake is
 // checked against that info-hash and nothing else — a per-torrent allow-list,
@@ -57,6 +66,7 @@ import (
 	"time"
 
 	"torrent-client/internal/metainfo"
+	"torrent-client/internal/ratelimit"
 	"torrent-client/internal/wire"
 )
 
@@ -115,6 +125,9 @@ type Config struct {
 	// Log receives one line per served block and per dropped connection. A nil
 	// Log discards them. Calls are serialised.
 	Log func(format string, args ...any)
+	// Limiter caps the upload rate; nil or a zero rate means unlimited. The
+	// caller owns it, so the download side can be capped independently.
+	Limiter *ratelimit.Limiter
 	// ServeDelay sleeps before answering each block request, widening the
 	// serving window. It exists for the swarm tests; production leaves it 0.
 	ServeDelay time.Duration
@@ -129,6 +142,13 @@ type Server struct {
 
 	ln    net.Listener
 	slots chan struct{}
+
+	// closing is cancelled by Close. It is folded into the context the
+	// limiter sees, because a serving goroutine asleep in a bandwidth wait is
+	// not released by closing its socket and would hold Close open until its
+	// reservation came round.
+	closing     context.Context
+	closeCancel context.CancelFunc
 
 	uploadedBytes atomic.Int64
 	uploadedBlock atomic.Int64
@@ -154,14 +174,17 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("seed: listen %s: %w", cfg.Listen, err)
 	}
+	closing, closeCancel := context.WithCancel(context.Background())
 	return &Server{
-		cfg:        cfg,
-		meta:       cfg.Meta,
-		src:        cfg.Source,
-		pieceCount: cfg.Meta.PieceCount(),
-		ln:         ln,
-		slots:      make(chan struct{}, uploadSlots),
-		conns:      make(map[net.Conn]struct{}),
+		cfg:         cfg,
+		meta:        cfg.Meta,
+		src:         cfg.Source,
+		pieceCount:  cfg.Meta.PieceCount(),
+		ln:          ln,
+		slots:       make(chan struct{}, uploadSlots),
+		closing:     closing,
+		closeCancel: closeCancel,
+		conns:       make(map[net.Conn]struct{}),
 	}, nil
 }
 
@@ -187,10 +210,17 @@ func (s *Server) BlocksServed() int64 { return s.uploadedBlock.Load() }
 // closes the listener and every open connection on the way out, so a returned
 // Serve leaves nothing running.
 func (s *Server) Serve(ctx context.Context) error {
+	// The serving goroutines get a context that Close also cancels, so a
+	// bandwidth wait is released on both shutdown paths.
+	serveCtx, cancelServe := context.WithCancel(ctx)
+	defer cancelServe()
+	stopClosing := context.AfterFunc(s.closing, cancelServe)
+	defer stopClosing()
+
 	closer := make(chan struct{})
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-serveCtx.Done():
 		case <-closer:
 		}
 		s.ln.Close()
@@ -203,7 +233,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		if err != nil {
 			// A cancelled context or our own Close closes the listener; that
 			// is a clean shutdown, not an accept failure.
-			if ctx.Err() != nil || s.isClosed() {
+			if serveCtx.Err() != nil || s.isClosed() {
 				return nil
 			}
 			return err
@@ -211,7 +241,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			s.serveConn(ctx, conn)
+			s.serveConn(serveCtx, conn)
 		}()
 	}
 }
@@ -225,6 +255,9 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
+	// Release anyone waiting for bandwidth before waiting for the serving
+	// goroutines: closing the sockets below does not interrupt a limiter wait.
+	s.closeCancel()
 	conns := make([]net.Conn, 0, len(s.conns))
 	for c := range s.conns {
 		conns = append(conns, c)
@@ -366,7 +399,12 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 			if !unchoked {
 				continue
 			}
-			if err := s.serveRequest(c, m); err != nil {
+			if err := s.serveRequest(ctx, c, m); err != nil {
+				if ctx.Err() != nil || s.isClosed() {
+					// The server is going away: the request was not
+					// refused, so this is not a peer to report.
+					return
+				}
 				s.logf("dropped inbound peer %s: %v", nc.RemoteAddr(), err)
 				return
 			}
@@ -382,7 +420,11 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 // not hold yet is ignored: peers race bitfields, and holding the connection
 // lets the peer fetch the piece once it verifies. Anything malformed is a
 // protocol violation and drops the connection without reading.
-func (s *Server) serveRequest(c *inbound, m wire.Message) error {
+//
+// The upload cap is enforced after the request has been validated and before
+// the block is read from disk: the wait is for the reply, so nothing is read
+// or buffered for bytes that are not about to go out.
+func (s *Server) serveRequest(ctx context.Context, c *inbound, m wire.Message) error {
 	index := int(m.Index)
 	if index < 0 || index >= s.pieceCount {
 		return fmt.Errorf("%w: request for piece %d, torrent has %d", errDrop, index, s.pieceCount)
@@ -398,6 +440,11 @@ func (s *Server) serveRequest(c *inbound, m wire.Message) error {
 			errDrop, m.Begin, m.Length, index, s.meta.PieceSize(index))
 	}
 
+	if s.cfg.Limiter != nil {
+		if err := s.cfg.Limiter.Wait(ctx, int(m.Length)); err != nil {
+			return err
+		}
+	}
 	if s.cfg.ServeDelay > 0 {
 		time.Sleep(s.cfg.ServeDelay)
 	}

@@ -56,6 +56,14 @@ type Stats struct {
 	PeersActive    int
 	PeersMaxActive int
 
+	// MaxDownRate and MaxUpRate are the configured caps in bytes per second;
+	// zero means unlimited. The engine owns the download cap and reports it
+	// here. The upload cap belongs to whoever runs the inbound listener, so a
+	// caller that wants it displayed fills MaxUpRate into the snapshot it
+	// hands the dashboard.
+	MaxDownRate int64
+	MaxUpRate   int64
+
 	// Blacklisted lists peer addresses dropped for the session.
 	Blacklisted []string
 	Peers       []PeerStat
@@ -104,6 +112,7 @@ func (e *Engine) Stats() Stats {
 		BadPieces:       e.counters.badPieces,
 		PeersDropped:    e.counters.peersDropped,
 		PeersMaxActive:  e.counters.peersMaxActive,
+		MaxDownRate:     e.limiter.Rate(),
 	}
 	if e.have != nil {
 		s.Have = append([]byte(nil), e.have...)

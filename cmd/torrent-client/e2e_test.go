@@ -1039,3 +1039,105 @@ func TestEndToEndCleanShutdownFlushesAndAnnouncesStopped(t *testing.T) {
 	}
 	t.Fatalf("the dev tracker never saw a stopped announce:\n%s", f.devtracker.logText())
 }
+
+// TestEndToEndRateLimitIsEnforced is the flag-wiring proof: the caps reach the
+// wiring, not just the argument parser. Client A downloads the fixture with a
+// download cap and asserts the whole transfer was paced at that cap; A then
+// seeds with an upload cap, the fixture seeder is stopped, and client B must
+// fetch the same content from A at A's upload cap rather than at wire speed.
+func TestEndToEndRateLimitIsEnforced(t *testing.T) {
+	if testing.Short() {
+		t.Skip("end-to-end download skipped in -short mode")
+	}
+
+	root := moduleRoot(t)
+	binDir := t.TempDir()
+	devtrackerBin := buildBinary(t, root, binDir, "./cmd/devtracker")
+	seedBin := buildBinary(t, root, binDir, "./cmd/seed")
+	clientBin := buildBinary(t, root, binDir, "./cmd/torrent-client")
+
+	devtracker := startRecorded(t, devtrackerBin, "-addr", "127.0.0.1:0", "-interval", "1")
+	line := devtracker.waitFor(t, "listening on", 20*time.Second)
+	addr := strings.TrimSpace(line[strings.Index(line, "listening on ")+len("listening on "):])
+	announceURL := "http://" + addr + "/announce"
+
+	const pieceLength = 128 * 1024
+	payload := make([]byte, 768*1024) // three seconds at 256 KiB/s
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	srcPath := filepath.Join(workDir, "payload.bin")
+	if err := os.WriteFile(srcPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	torrentPath := filepath.Join(workDir, "payload.torrent")
+	writeTorrent(t, torrentPath, announceURL, "payload.bin", pieceLength, payload)
+
+	fixture := startRecorded(t, seedBin, torrentPath, srcPath)
+	fixture.waitFor(t, "seed: ready", 20*time.Second)
+
+	const downCap = 256 * 1024
+	const upCap = 128 * 1024
+
+	port := freePort(t)
+	outA := filepath.Join(t.TempDir(), "A.bin")
+	began := time.Now()
+	a := startClient(t, clientBin, "-seed", "-port", strconv.Itoa(port),
+		"-max-down-rate", "256k", "-max-up-rate", "128k", torrentPath, outA)
+	a.waitFor(t, "engine: seeding", 90*time.Second)
+	downloadElapsed := time.Since(began)
+	assertFileEquals(t, outA, payload)
+
+	if log := a.logText(); !strings.Contains(log, "download capped at 256.0 kB/s") {
+		t.Fatalf("the client did not report the download cap;\nlog:\n%s", log)
+	} else if !strings.Contains(log, "upload capped at 128.0 kB/s") {
+		t.Fatalf("the client did not report the upload cap;\nlog:\n%s", log)
+	}
+
+	// Both directions of the band: ignoring the cap would finish in well under
+	// a second, stalling would never finish at all.
+	got := float64(len(payload)) / downloadElapsed.Seconds()
+	if got > 1.5*float64(downCap) {
+		t.Fatalf("download ran at %.0f B/s over %s, want no more than 1.5x the %d B/s cap",
+			got, downloadElapsed, downCap)
+	}
+	if got < 0.5*float64(downCap) {
+		t.Fatalf("download ran at %.0f B/s over %s, want at least 0.5x the %d B/s cap",
+			got, downloadElapsed, downCap)
+	}
+	t.Logf("capped download: %d bytes in %s (%.0f B/s, cap %d)", len(payload), downloadElapsed, got, downCap)
+
+	// With the fixture gone, A's upload cap is the only thing that can pace B.
+	if err := fixture.cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("stop fixture seeder: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	outB := filepath.Join(t.TempDir(), "B.bin")
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	bc := exec.CommandContext(ctx, clientBin, torrentPath, outB)
+	var bStderr bytes.Buffer
+	bc.Stderr = &bStderr
+	bStarted := time.Now()
+	if err := bc.Run(); err != nil {
+		t.Fatalf("second client failed: %v\nstderr:\n%s", err, bStderr.String())
+	}
+	servedElapsed := time.Since(bStarted)
+	assertFileEquals(t, outB, payload)
+
+	served := float64(len(payload)) / servedElapsed.Seconds()
+	if served > 1.5*float64(upCap) {
+		t.Fatalf("A served B at %.0f B/s over %s, want no more than 1.5x A's %d B/s upload cap",
+			served, servedElapsed, upCap)
+	}
+	if served < 0.5*float64(upCap) {
+		t.Fatalf("A served B at %.0f B/s over %s, want at least 0.5x A's %d B/s upload cap",
+			served, servedElapsed, upCap)
+	}
+	if a.countLines("served piece=") == 0 {
+		t.Fatalf("the capped seeding client served nothing;\nlog:\n%s", a.logText())
+	}
+	t.Logf("capped upload: %d bytes in %s (%.0f B/s, cap %d)", len(payload), servedElapsed, served, upCap)
+}

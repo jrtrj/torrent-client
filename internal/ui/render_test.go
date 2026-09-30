@@ -221,3 +221,55 @@ func TestRenderWithNoTotalDoesNotDivideByZero(t *testing.T) {
 		t.Fatalf("empty stats rendered %q, want 0%%", out)
 	}
 }
+
+func TestLimitBadgeNamesOnlyTheCappedDirections(t *testing.T) {
+	tests := []struct {
+		name string
+		st   engine.Stats
+		want string
+	}{
+		{"unlimited", engine.Stats{}, ""},
+		{"down only", engine.Stats{MaxDownRate: 512 * 1024}, "cap \u2193512.0 kB/s"},
+		{"up only", engine.Stats{MaxUpRate: 2 * 1024 * 1024}, "cap \u21912.0 MB/s"},
+		{"both", engine.Stats{MaxDownRate: 512 * 1024, MaxUpRate: 2 * 1024 * 1024}, "cap \u2193512.0 kB/s \u21912.0 MB/s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := LimitBadge(tt.st); got != tt.want {
+				t.Fatalf("LimitBadge() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The display has to say that limiting is on, and a capped frame still has to
+// obey the width budget at every width.
+func TestRenderShowsActiveCaps(t *testing.T) {
+	st := renderStats()
+	st.MaxDownRate = 512 * 1024
+	st.MaxUpRate = 2 * 1024 * 1024
+
+	wide := Render(st, 0, 120)
+	if !strings.Contains(wide, "cap") || !strings.Contains(wide, "512.0 kB/s") || !strings.Contains(wide, "2.0 MB/s") {
+		t.Fatalf("capped frame %q does not name the caps", wide)
+	}
+	// The limits are the last field, so they drop first on a narrow terminal
+	// but must never crowd an unlimited frame; an unlimited one shows nothing.
+	if got := Render(renderStats(), 0, 120); strings.Contains(got, "cap") {
+		t.Fatalf("unlimited frame %q claims a cap", got)
+	}
+
+	for width := 1; width <= 200; width++ {
+		out := Render(st, 1.8*1024*1024, width)
+		budget := width - 1
+		if budget < 1 {
+			budget = 1
+		}
+		if n := utf8.RuneCountInString(out); n > budget {
+			t.Fatalf("width %d: capped frame is %d runes, want <= %d: %q", width, n, budget, out)
+		}
+		if !utf8.ValidString(out) {
+			t.Fatalf("width %d: capped frame is not valid UTF-8: %q", width, out)
+		}
+	}
+}
