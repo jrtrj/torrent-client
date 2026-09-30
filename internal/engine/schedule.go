@@ -9,7 +9,7 @@ import (
 	"torrent-client/internal/wire"
 )
 
-// eventKind says what a connection pump reported to the scheduler.
+// What a connection pump reported to the scheduler.
 type eventKind int
 
 const (
@@ -23,8 +23,8 @@ const (
 	evGone
 )
 
-// event is one thing that happened on one connection. Everything a pump
-// reports travels in this shape so the scheduler has a single input.
+// One thing that happened on one connection. Every pump report travels in this
+// shape, so the scheduler has a single input.
 type event struct {
 	kind  eventKind
 	peer  *peerConn
@@ -35,8 +35,8 @@ type event struct {
 	data  []byte
 }
 
-// counters are the session totals behind Stats. They live under Engine.mu with
-// the rest of the scheduling state.
+// counters are the session totals behind Stats, living under Engine.mu with the
+// rest of the scheduling state.
 type counters struct {
 	bytesIn         int64
 	blocksRequested int64
@@ -48,8 +48,8 @@ type counters struct {
 	peersMaxActive  int
 }
 
-// handleLocked folds one event into the scheduling state and reports whether
-// it moved the download forward.
+// Folds one event into the scheduling state, reporting whether it moved the
+// download forward.
 func (e *Engine) handleLocked(ev event) bool {
 	switch ev.kind {
 	case evConnected:
@@ -99,9 +99,8 @@ func (e *Engine) handleLocked(ev event) bool {
 			return false
 		}
 		p.choked = true
-		// Outstanding blocks are put back on the market, but the piece keeps
-		// whatever it already received, so a mid-transfer choke costs the
-		// in-flight window, not the work.
+		// Outstanding blocks go back on the market, but the piece keeps what it
+		// already received: a mid-transfer choke costs the window, not the work.
 		e.releasePeerLocked(p)
 		e.scheduleLocked()
 		return false
@@ -116,9 +115,9 @@ func (e *Engine) handleLocked(ev event) bool {
 		return progress
 
 	case evRequestDropped:
-		// The write pump refused to send a request because the peer had choked
-		// us in the meantime. Putting the block back immediately is what makes
-		// a mid-transfer choke recover without waiting for the stall timer.
+		// The write pump refused to send: the peer choked us in the meantime.
+		// Putting the block back now is what lets a mid-transfer choke recover
+		// without sweating out the stall timer.
 		p := e.peers[ev.addr]
 		if p == nil {
 			return false
@@ -158,19 +157,18 @@ func (e *Engine) connectedLocked(ev event) {
 		piece:     -1,
 		bits:      wire.NewBitfield(e.pieceCount),
 	}
-	// Advertise everything we already hold in one bitfield frame — the
-	// standard single-frame form of "have" for every held piece. A peer we
-	// meet after a resume therefore knows those pieces are not missing, and a
-	// fresh download sends nothing because nothing is held. The slice is
-	// copied because the write pump encodes it after this lock is dropped.
+	// Advertise everything we hold in one bitfield frame — the standard
+	// single-frame "have" for every held piece. A peer met after a resume knows
+	// those pieces aren't missing; a fresh download sends nothing. The slice is
+	// copied because the write pump encodes it after we drop the lock.
 	if e.haveCount > 0 {
 		ev.peer.push(wire.Message{ID: wire.IDBitfield, Bitfield: append([]byte(nil), e.have...)})
 	}
 	e.logf("engine: connected to %s", ev.addr)
 }
 
-// goneLocked retires a connection that failed or closed. It is not a
-// blacklist: a peer that goes away may come back on the next announce.
+// goneLocked retires a connection that failed or closed. Not a blacklist: a
+// peer that goes away may be back on the next announce.
 func (e *Engine) goneLocked(addr string) {
 	p := e.peers[addr]
 	if p == nil {
@@ -180,17 +178,16 @@ func (e *Engine) goneLocked(addr string) {
 	delete(e.attempting, addr)
 	p.connected = false
 	e.releasePeerLocked(p)
-	// A piece that a departing peer had contributed to is thrown away: its
-	// blocks may be bad, and blaming only the peers still connected on a later
-	// hash failure would be wrong.
+	// A piece a departing peer contributed to is thrown away: its blocks may be
+	// bad, and blaming only the peers still connected on a later hash failure
+	// would be wrong.
 	e.forgetContributionsLocked(p)
 	e.logf("engine: peer %s disconnected", addr)
 }
 
-// scheduleLocked hands work to every idle, unchoked peer. It is the only place
-// a request is created, so the in-flight window is enforced in one spot: a
-// block is claimed for the peer as the request is queued, which is what keeps
-// a later pass from asking for the same block again.
+// scheduleLocked hands work to every idle, unchoked peer. It's the only place
+// a request is created, so the window is enforced in one spot: a block is
+// claimed as the request is queued, which stops a later pass asking again.
 func (e *Engine) scheduleLocked() {
 	for _, p := range e.peers {
 		if !p.connected || p.choked || p.blacklisted {
@@ -216,11 +213,10 @@ func (e *Engine) scheduleLocked() {
 	e.updateActiveLocked()
 }
 
-// nextBlockLocked picks the next block for one peer. A peer keeps working the
-// piece it owns until that piece is done; otherwise it adopts the first piece
-// it can actually serve. "It has the piece" is checked against the peer's
-// bitfield, so a peer that lacks a piece is never enqueued for it — the
-// classic idle-spin bug has no path here.
+// nextBlockLocked picks the next block for one peer. It keeps working the piece
+// it owns until that's done, otherwise adopts the first piece it can actually
+// serve — checked against its bitfield, so a peer lacking a piece is never
+// enqueued for it and the classic idle-spin bug has no path here.
 func (e *Engine) nextBlockLocked(p *peerState) (*pieceState, int, bool) {
 	if p.piece >= 0 {
 		ps := e.pieces[p.piece]
@@ -249,7 +245,7 @@ func (e *Engine) nextBlockLocked(p *peerState) (*pieceState, int, bool) {
 	return nil, 0, false
 }
 
-// blockLocked applies one block a peer sent us.
+// Applies one block a peer sent us.
 func (e *Engine) blockLocked(p *peerState, ev event) bool {
 	if ev.index < 0 || ev.index >= len(e.pieces) {
 		e.dropPeerLocked(p, fmt.Sprintf("block for piece %d is out of range", ev.index))
@@ -293,8 +289,7 @@ func (e *Engine) blockLocked(p *peerState, ev event) bool {
 	return true
 }
 
-// verifyPieceLocked checks a completed piece and either keeps it or blames the
-// peers that supplied it.
+// Checks a completed piece: keep it, or blame the peers that supplied it.
 func (e *Engine) verifyPieceLocked(ps *pieceState) {
 	if ps.owner != nil {
 		ps.owner.piece = -1
@@ -328,8 +323,8 @@ func (e *Engine) verifyPieceLocked(ps *pieceState) {
 	wire.BitfieldSet(e.have, ps.index)
 	e.haveCount++
 	e.bytesDone += ps.size
-	// A verified piece is what the resume sidecar records, so the state is
-	// dirtied here and written by the scheduler's next pass.
+	// The resume sidecar records verified pieces, so dirty the state here and
+	// the scheduler's next pass writes it.
 	e.stateDirty = true
 	e.logf("engine: piece %d/%d verified (%d/%d bytes)", ps.index+1, e.pieceCount, e.bytesDone, e.meta.TotalLength())
 
@@ -341,8 +336,8 @@ func (e *Engine) verifyPieceLocked(ps *pieceState) {
 }
 
 // releasePeerLocked takes a peer out of the request loop without forgetting
-// what it already gave us: its piece is reopened for any other peer to adopt,
-// and its outstanding requests are cleared so the stall reaper is not needed.
+// what it already gave us: its piece reopens for any other peer to adopt, and
+// its outstanding requests are cleared so the stall reaper isn't needed.
 func (e *Engine) releasePeerLocked(p *peerState) {
 	for _, ps := range e.pieces {
 		if ps.owner == p {
@@ -359,8 +354,8 @@ func (e *Engine) releasePeerLocked(p *peerState) {
 }
 
 // forgetContributionsLocked drops the partial state of every unfinished piece
-// this peer had a hand in, so a later hash failure can never blame a peer that
-// is still connected for data a departed peer supplied.
+// this peer had a hand in, so a later hash failure can't blame a peer that's
+// still connected for data a departed peer supplied.
 func (e *Engine) forgetContributionsLocked(p *peerState) {
 	for _, ps := range e.pieces {
 		if !ps.verified && ps.contributors[p] {
@@ -370,7 +365,7 @@ func (e *Engine) forgetContributionsLocked(p *peerState) {
 }
 
 // dropPeerLocked blacklists a peer for the session and tears its connection
-// down. It is the response to bad data and to protocol violations.
+// down. It's the answer to bad data and to protocol violations.
 func (e *Engine) dropPeerLocked(p *peerState, reason string) {
 	if p.blacklisted {
 		return
@@ -387,7 +382,7 @@ func (e *Engine) dropPeerLocked(p *peerState, reason string) {
 	p.pc.close()
 }
 
-// refreshInterestLocked tells a peer we want something from it, once.
+// Tells a peer we want something from it, once.
 func (e *Engine) refreshInterestLocked(p *peerState) {
 	if p.interested {
 		return
@@ -401,9 +396,9 @@ func (e *Engine) refreshInterestLocked(p *peerState) {
 	}
 }
 
-// expireStallsLocked re-issues blocks whose requests went unanswered. The
-// piece is handed back at the same time, so the block can go to a different
-// peer instead of the one that is stalling.
+// expireStallsLocked re-issues blocks whose requests went unanswered, handing
+// the piece back too so the block can go to a different peer than the one
+// stalling.
 func (e *Engine) expireStallsLocked() {
 	now := time.Now()
 	expired := false
@@ -432,8 +427,8 @@ func (e *Engine) expireStallsLocked() {
 	}
 }
 
-// updateActiveLocked keeps the peak number of peers with work in the pipe,
-// which is the value that proves several peers were used at once.
+// updateActiveLocked keeps the peak number of peers with work in the pipe — the
+// number that proves several peers were used at once.
 func (e *Engine) updateActiveLocked() {
 	active := 0
 	for _, p := range e.peers {

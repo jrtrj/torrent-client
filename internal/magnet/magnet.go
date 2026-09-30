@@ -1,10 +1,9 @@
 // Package magnet parses magnet URIs (BEP 9's xt=urn:btih form).
 //
 // A magnet link carries no metadata: just the info-hash and where to look. The
-// metadata itself is fetched from peers over ut_metadata, which lives in
-// internal/metadata. DHT is out of scope for this client, so a magnet that
-// names no tracker is refused rather than accepted and later found
-// unresolvable.
+// dictionary itself comes from peers over ut_metadata (internal/metadata). DHT
+// is out of scope for this client, so a magnet naming no tracker is refused up
+// front rather than accepted and later found unresolvable.
 package magnet
 
 import (
@@ -49,7 +48,7 @@ func Parse(uri string) (*Magnet, error) {
 		return nil, fmt.Errorf("magnet: no usable xt=urn:btih info-hash")
 	}
 
-	// dn is a display name only; xl and other keys are accepted and ignored.
+	// dn is display only; xl and the rest are accepted and ignored.
 	m.DisplayName = values.Get("dn")
 	for _, tr := range values["tr"] {
 		if tr = strings.TrimSpace(tr); tr != "" {

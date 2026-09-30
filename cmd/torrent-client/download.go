@@ -27,10 +27,10 @@ import (
 	"torrent-client/internal/ui"
 )
 
-// seedSource adapts the download engine and the content store to the upload
-// path: the engine says which pieces are verified and servable, the store
-// hands out their bytes. The engine is replaced when the client retries with
-// another tracker, so the pointer is guarded.
+// seedSource feeds the upload path from the download engine and the content
+// store: the engine says which pieces are verified and servable, the store
+// hands out their bytes. The engine is swapped on a tracker retry, so the
+// pointer is guarded.
 type seedSource struct {
 	store *storage.Storage
 
@@ -66,13 +66,13 @@ func (s *seedSource) ReadBlock(index int, begin, length uint32) ([]byte, error) 
 }
 
 // execute runs a validated invocation: load the metainfo, pick a tracker,
-// download the content, and report the exit code. Everything that can go
-// wrong here is a runtime failure, so it maps to exitFatal.
+// download, report the exit code. Anything that goes wrong here is a runtime
+// failure, so it's exitFatal.
 func execute(cfg config, stdout, stderr io.Writer) int {
-	// The live display owns stderr from here on. Events are reported through
-	// it so they scroll beneath the sticky progress line instead of being
-	// overwritten by it; on a stream that cannot take cursor control it
-	// degrades to the plain appended lines the tests read.
+	// The live display owns stderr from here on. Events go through it so they
+	// scroll beneath the sticky progress line rather than being overwritten by
+	// it; on a stream that can't take cursor control it falls back to the plain
+	// appended lines the tests read.
 	dash := ui.New(stderr)
 	defer dash.Close()
 
@@ -84,8 +84,8 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		dash.Eventf("torrent-client: "+format, args...)
 	}
 
-	// Ctrl-C cancels cleanly; the pieces already written stay on disk and the
-	// resume sidecar keeps them for the next run.
+	// Ctrl-C cancels cleanly: pieces already written stay on disk and the resume
+	// sidecar carries them to the next run.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -94,9 +94,9 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		return fail(fmt.Errorf("generate peer id: %w", err))
 	}
 
-	// A magnet link carries only an info-hash, so the metadata is fetched from
-	// the swarm first. From there both sources describe the same torrent and
-	// nothing below this point cares which one it came from.
+	// A magnet carries only an info-hash, so the metadata is fetched from the
+	// swarm first. Past this point both sources are just a torrent, and nothing
+	// cares which one it came from.
 	var meta *metainfo.MetaInfo
 	if strings.HasPrefix(cfg.source, "magnet:") {
 		meta, err = resolveMagnet(ctx, cfg.source, peerID, uint16(cfg.port), logf)
@@ -111,9 +111,9 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		return fail(fmt.Errorf("the torrent has no tracker to announce to"))
 	}
 
-	// Where the content lands, and the store that speaks that layout. Both come
-	// from internal/content so the download and seed paths cannot disagree
-	// about which file a piece lives in.
+	// Where the content lands, plus the store that speaks that layout. Both come
+	// from internal/content, so the download and seed paths can't disagree about
+	// which file a piece lives in.
 	output, err := content.OutputFor(meta, cfg.output)
 	if err != nil {
 		return fail(err)
@@ -124,13 +124,13 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	}
 	defer store.Close()
 
-	// The resume sidecar is keyed to this torrent's info-hash and this output
-	// path, so a leftover sidecar from another torrent or another output is
-	// never adopted. It lives beside the output as "<output>.resume".
+	// The resume sidecar is keyed to this info-hash and this output path, so a
+	// stray one from another torrent or output is never adopted. It sits beside
+	// the output as "<output>.resume".
 	resume := state.Open(output, meta.InfoHash, meta.Info.PieceLength, meta.TotalLength(), meta.PieceCount())
 
 	// The redraw loop runs for the whole download; on a non-terminal stream it
-	// returns immediately and the logf above stays a plain line writer.
+	// returns at once and logf stays a plain line writer.
 	go dash.Run(ctx)
 
 	logf("downloading %q (%d pieces, %d bytes) to %s",
@@ -139,10 +139,10 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		logf("download capped at %s", ui.HumanRate(float64(cfg.maxDownRate)))
 	}
 
-	// With -seed the client also uploads. The content store and the inbound
-	// listener come up before the first announce, so the port we advertise is
-	// the port we actually serve on and the listener is live while we fetch,
-	// which is what lets a piece become servable the moment it verifies.
+	// With -seed the client also uploads. The store and the listener come up
+	// before the first announce, so the port we advertise is the one we serve on,
+	// and the listener is live while we fetch — a piece becomes servable the
+	// moment it verifies.
 	var (
 		srv       *seed.Server
 		source    *seedSource
@@ -150,8 +150,8 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		uploaded  func() int64
 	)
 	if cfg.seed {
-		// The upload direction gets its own bucket: throttling the download
-		// must not throttle the pieces we serve, and the other way round.
+		// The upload direction gets its own bucket: capping the download must not
+		// cap the pieces we serve, and vice versa.
 		upLimiter = ratelimit.New(cfg.maxUpRate)
 
 		source = &seedSource{store: store}
@@ -182,12 +182,12 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// Try each announce URL in turn: a tracker that is down is not a reason to
-	// give up while another one knows the swarm.
+	// Try each announce URL in turn: one dead tracker isn't a reason to give up
+	// while another knows the swarm.
 	var lastErr error
 	for _, announceURL := range trackers {
-		// The URL scheme picks the wire protocol (http/https or udp); the
-		// engine only ever sees the tracker.Tracker interface.
+		// The URL scheme picks the wire protocol (http/https or udp); the engine
+		// only ever sees the tracker.Tracker interface.
 		tr, err := tracker.New(announceURL)
 		if err != nil {
 			logf("tracker %s is unusable: %v", announceURL, err)
@@ -210,10 +210,10 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		if source != nil {
 			source.setEngine(eng)
 		}
-		// Point the sticky line at this engine's counters for as long as it
-		// runs; a retry with the next tracker replaces the source. The engine
-		// reports the download cap; the upload cap lives in the seed server
-		// and is filled in here, so the display can show that limiting is on.
+		// Point the sticky line at this engine's counters while it runs; a retry
+		// with the next tracker swaps the source. The engine reports the download
+		// cap, but the upload cap lives in the seed server, so it's filled in here
+		// just so the display can show limiting is on.
 		upRate := int64(0)
 		if cfg.seed {
 			upRate = cfg.maxUpRate
@@ -224,15 +224,15 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 			return s
 		})
 		runErr := eng.Run(ctx)
-		// The engine has stopped announcing, so release the tracker's socket
-		// before moving on to the next URL.
+		// The engine has stopped announcing, so release the tracker's socket before
+		// the next URL.
 		if closer, ok := tr.(io.Closer); ok {
 			_ = closer.Close()
 		}
 		if runErr != nil {
 			if ctx.Err() != nil {
-				// Ctrl-C during the download: a clean stop, not a failure.
-				// The state flushed above is enough to resume next time.
+				// Ctrl-C mid-download is a clean stop, not a failure. The state flushed
+				// above is enough to resume next time.
 				dash.Eventf("torrent-client: interrupted; resume state saved for %s", output)
 				return exitOK
 			}
@@ -243,15 +243,15 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		lastErr = nil
 		break
 	}
-	// No engine is running any more, so retire the progress line before the
-	// final messages; otherwise a stale frame would sit above them.
+	// No engine runs any more, so retire the progress line before the final
+	// messages — otherwise a stale frame sits above them.
 	dash.Track(nil)
 	if lastErr != nil {
 		return fail(fmt.Errorf("download failed: %w", lastErr))
 	}
 
-	// With -seed, Run returns only when the context is cancelled: the client
-	// stayed in the swarm, uploading, until then.
+	// With -seed, Run returns only when the context is cancelled: until then the
+	// client stayed in the swarm uploading.
 	if cfg.seed {
 		dash.Eventf("torrent-client: seeding stopped: %s", output)
 		return exitOK
@@ -260,17 +260,16 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// magnetTimeout bounds resolving a magnet: finding peers and pulling the
-// metadata is a negotiation, not the download itself, so it must not hang for
-// as long as a transfer legitimately could.
+// magnetTimeout bounds resolving a magnet: finding peers and pulling metadata
+// is a negotiation, not the download, so it mustn't hang as long as a real
+// transfer legitimately could.
 const magnetTimeout = 90 * time.Second
 
-// resolveMagnet turns a magnet link into metainfo. The link carries only an
-// info-hash, so we announce to one of its trackers to find peers, pull the info
-// dictionary from them over ut_metadata, and then check it against the hash the
-// link asked for. That check is what makes this safe: the hash is the only
-// reason to trust bytes a stranger sent, and it is what stops a hostile peer
-// from feeding us a different torrent under the name we asked for.
+// resolveMagnet turns a magnet into metainfo. The link carries only an
+// info-hash, so we announce to one of its trackers, pull the info dictionary
+// over ut_metadata, and check it against the hash we asked for. That check is
+// the whole basis of trust: the hash is the only reason to believe bytes a
+// stranger sent, and it stops a hostile peer serving a different torrent.
 func resolveMagnet(ctx context.Context, uri string, peerID [20]byte, port uint16, logf func(string, ...any)) (*metainfo.MetaInfo, error) {
 	m, err := magnet.Parse(uri)
 	if err != nil {
@@ -293,9 +292,9 @@ func resolveMagnet(ctx context.Context, uri string, peerID [20]byte, port uint16
 			InfoHash: m.InfoHash,
 			PeerID:   peerID,
 			Port:     port,
-			// We do not know the size yet, but a non-zero Left is what stops a
-			// tracker from counting us as a seeder. The engine reports the real
-			// figures once it takes this swarm over.
+			// We don't know the size yet, but a non-zero Left is what stops a tracker
+			// counting us as a seeder. The engine reports the real numbers once it
+			// takes the swarm over.
 			Left:    1,
 			Event:   tracker.EventStarted,
 			NumWant: 50,

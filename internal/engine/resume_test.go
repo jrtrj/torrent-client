@@ -16,9 +16,8 @@ import (
 	"torrent-client/internal/wire"
 )
 
-// seedOutput writes the chosen pieces of data straight into the output file, as
-// a previous run would have left them, and nothing else. Pieces not listed stay
-// zero, which is exactly the state a killed download leaves behind.
+// seedOutput writes just the chosen pieces into the output file, the way a
+// previous run left them; unlisted pieces stay zero, like a killed download.
 func seedOutput(t *testing.T, out string, meta *metainfo.MetaInfo, data []byte, pieces ...int) {
 	t.Helper()
 	store, err := storage.Open(out, meta.Info.PieceLength, meta.TotalLength())
@@ -34,7 +33,6 @@ func seedOutput(t *testing.T, out string, meta *metainfo.MetaInfo, data []byte, 
 	}
 }
 
-// haveBitfield builds a verified-piece bitfield with the given pieces set.
 func haveBitfield(pieces int, set ...int) []byte {
 	b := make([]byte, (pieces+7)/8)
 	for _, i := range set {
@@ -43,10 +41,9 @@ func haveBitfield(pieces int, set ...int) []byte {
 	return b
 }
 
-// TestResumeAdoptsVerifiedPiecesAndAdvertisesThem is the scheduler half of the
-// resume proof: a piece the sidecar claims and the file still proves is adopted
-// rather than fetched, is advertised to peers in the opening bitfield, and the
-// sidecar is removed once the download completes.
+// TestResumeAdoptsVerifiedPiecesAndAdvertisesThem: a piece the sidecar claims
+// and the file still proves gets adopted instead of fetched, advertised in the
+// opening bitfield, and the sidecar is dropped once the download completes.
 func TestResumeAdoptsVerifiedPiecesAndAdvertisesThem(t *testing.T) {
 	const pieceLength = 64 * 1024
 	data := testPayload(t, 3*pieceLength)
@@ -87,9 +84,9 @@ func TestResumeAdoptsVerifiedPiecesAndAdvertisesThem(t *testing.T) {
 	}
 }
 
-// TestResumeDropsTamperedPieceAndRefetches is the verify-then-trust half: the
-// sidecar claims piece 0, the content file no longer matches, so the claim must
-// be rejected and the piece fetched again rather than trusted.
+// TestResumeDropsTamperedPieceAndRefetches: the sidecar claims piece 0 but the
+// bytes on disk no longer match, so the claim is rejected and the piece fetched
+// again.
 func TestResumeDropsTamperedPieceAndRefetches(t *testing.T) {
 	const pieceLength = 64 * 1024
 	data := testPayload(t, 3*pieceLength)
@@ -132,9 +129,8 @@ func TestResumeDropsTamperedPieceAndRefetches(t *testing.T) {
 	}
 }
 
-// TestResumeIgnoresForeignSidecar checks the keying rule at the engine: a
-// sidecar for another torrent at the same output path is not adopted, so the
-// whole download is fetched as if it were fresh.
+// TestResumeIgnoresForeignSidecar: a sidecar for a different torrent at the
+// same output path must not be adopted, so the whole download runs as if fresh.
 func TestResumeIgnoresForeignSidecar(t *testing.T) {
 	const pieceLength = 64 * 1024
 	data := testPayload(t, 2*pieceLength)
@@ -146,8 +142,6 @@ func TestResumeIgnoresForeignSidecar(t *testing.T) {
 	var otherHash [20]byte
 	otherHash[0] = 0xEE
 	resume := state.Open(out, otherHash, meta.Info.PieceLength, meta.TotalLength(), meta.PieceCount())
-	// The bytes on disk are this torrent's, but the sidecar names a different
-	// torrent, so it must be ignored rather than adopted.
 	foreign := state.Open(out, meta.InfoHash, meta.Info.PieceLength, meta.TotalLength(), meta.PieceCount())
 	if err := foreign.Save(haveBitfield(meta.PieceCount(), 0, 1)); err != nil {
 		t.Fatalf("save sidecar: %v", err)
@@ -212,11 +206,10 @@ func TestShutdownAnnounceIsBounded(t *testing.T) {
 	errs := make(chan error, 1)
 	go func() { errs <- eng.Run(ctx) }()
 
-	// Let the initial announce land, then cancel while the engine is waiting
-	// for peers that never arrive.
-	// Generous budgets: these assert liveness (returns at all, advertised at
-	// all), and a loaded CI box can delay goroutines by seconds. A tight
-	// window turns a scheduling hiccup into a false failure.
+	// Let the initial announce land, then cancel while the engine waits for peers
+	// that never arrive. Budgets are generous because these assert liveness — a
+	// loaded CI box can delay goroutines by seconds, and a tight window turns a
+	// scheduling hiccup into a false failure.
 	deadline := time.Now().Add(30 * time.Second)
 	for stub.callCount() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)

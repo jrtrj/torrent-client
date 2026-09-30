@@ -17,9 +17,9 @@ const (
 	// a piece may be shorter.
 	BlockSize = 16 * 1024
 
-	// MaxMessageLength caps an inbound frame. The largest legitimate message
-	// is a 16 KiB block plus 9 bytes of framing, so this only ever rejects
-	// garbage (a bitfield for a torrent with millions of pieces still fits).
+	// MaxMessageLength caps an inbound frame. The biggest legitimate message is
+	// a 16 KiB block plus 9 bytes of framing, so the only thing it ever rejects
+	// is garbage — even a bitfield for a torrent with millions of pieces fits.
 	MaxMessageLength = 4 << 20
 
 	// ExtensionProtocolBit is the reserved-byte flag advertising the extension
@@ -41,19 +41,18 @@ type Handshake struct {
 	PeerID   [20]byte
 }
 
-// NewHandshake builds our outbound handshake, advertising the extension
-// protocol. That bit used to stay clear because we could not answer an
-// extension handshake; now that ut_metadata is implemented it is set honestly.
-// The DHT bit stays clear: DHT is still out of scope, so advertising it would
-// invite messages we cannot answer.
+// NewHandshake builds our outbound handshake and sets the extension-protocol
+// bit: ut_metadata is implemented now, so we can answer an extension
+// handshake. The DHT bit stays clear — DHT is out of scope, and advertising
+// it would only invite messages we cannot answer.
 func NewHandshake(infoHash, peerID [20]byte) Handshake {
 	h := Handshake{InfoHash: infoHash, PeerID: peerID}
 	h.Reserved[5] |= ExtensionProtocolBit
 	return h
 }
 
-// SupportsExtensions reports whether the peer advertised the extension
-// protocol (BEP 10).
+// SupportsExtensions reports whether the peer set the extension protocol bit
+// (BEP 10).
 func (h Handshake) SupportsExtensions() bool {
 	return h.Reserved[5]&ExtensionProtocolBit != 0
 }
@@ -69,9 +68,9 @@ func (h Handshake) Encode() []byte {
 	return buf
 }
 
-// ReadHandshake reads one handshake and validates both the protocol string and
-// the info-hash against the torrent we intend to talk about. A mismatch is
-// connection-fatal: the peer is not in this swarm.
+// ReadHandshake reads one handshake and checks both the protocol string and
+// the info-hash against the torrent we mean to talk about. A mismatch is
+// connection-fatal: that peer is not in this swarm.
 func ReadHandshake(r io.Reader, wantInfoHash [20]byte) (Handshake, error) {
 	var h Handshake
 	buf := make([]byte, HandshakeLen)

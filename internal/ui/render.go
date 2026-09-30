@@ -8,25 +8,23 @@ import (
 	"torrent-client/internal/engine"
 )
 
-// The bar uses the glyph pair the design pinned: an inward-pointing cap on
-// each end, filled cells and empty cells between them.
 const (
 	barCapLeft  = "\u2595" // RIGHT ONE EIGHTH BLOCK: left cap
 	barCapRight = "\u258f" // LEFT ONE EIGHTH BLOCK: right cap
 	barFull     = "\u2588"
 	barEmpty    = "\u2591"
 
-	// barCells is the interior width of the bar on a normal terminal. It is
-	// shrunk by Render on a narrow one.
+	// barCells is the interior bar width on a normal terminal; Render shrinks
+	// it when the line has to fit somewhere narrower.
 	barCells = 16
-	// minBarCells keeps a shrunken bar readable: a bar shorter than this says
-	// less than the percentage figure printed next to it.
+	// minBarCells: below this the bar says less than the percentage printed
+	// next to it anyway, so Render won't shrink it further.
 	minBarCells = 1
 )
 
-// fractionOf is the completed share of the torrent, clamped to 0..1, so a
-// stats snapshot that overshoots (bytes counted for pieces not yet verified)
-// cannot render a bar longer than its track.
+// fractionOf is the completed share of the torrent, clamped to 0..1 so a
+// snapshot that overshoots — bytes counted for pieces not yet verified — can't
+// render a bar longer than its track.
 func fractionOf(st engine.Stats) float64 {
 	if st.BytesTotal <= 0 {
 		return 0
@@ -42,8 +40,8 @@ func fractionOf(st engine.Stats) float64 {
 }
 
 // Bar renders the progress track for fraction (clamped to 0..1) with cells
-// interior cells. The caps are always present and count towards the length, so
-// the returned string is always cells+2 glyphs wide.
+// interior cells. The caps are always there and count towards the length, so
+// the result is cells+2 glyphs wide.
 func Bar(fraction float64, cells int) string {
 	if cells < minBarCells {
 		cells = minBarCells
@@ -66,8 +64,8 @@ func Bar(fraction float64, cells int) string {
 	return b.String()
 }
 
-// Percent formats completed over total as an integer percentage. The engine
-// counts verified bytes, so this is progress, not throughput.
+// Percent is completed over total as a whole number. The engine counts only
+// verified bytes, so this is progress, never throughput.
 func Percent(done, total int64) string {
 	if total <= 0 {
 		return "0%"
@@ -82,9 +80,9 @@ func Percent(done, total int64) string {
 	return fmt.Sprintf("%d%%", pct)
 }
 
-// HumanRate formats a bytes-per-second rate the way the design's "1.8 MB/s"
-// reads: binary units, one decimal place so the number stays narrow and does
-// not jitter its own width between frames.
+// HumanRate formats a bytes-per-second rate as the design's "1.8 MB/s": binary
+// units, one decimal place, so the field holds a steady width from frame to
+// frame instead of jittering.
 func HumanRate(bytesPerSec float64) string {
 	if bytesPerSec < 0 {
 		bytesPerSec = 0
@@ -101,9 +99,9 @@ func HumanRate(bytesPerSec float64) string {
 	}
 }
 
-// ETA formats the time left given the remaining bytes at rate. A rate of zero
-// means "not known yet" — a countdown invented from no throughput would be a
-// lie — so it yields the placeholder, and reached/zero remaining yields zero.
+// ETA is the time left for remaining bytes at rate. A rate of zero means "not
+// known yet" — inventing a countdown from no throughput would be a lie — and
+// zero or negative remaining means we're done.
 func ETA(remaining int64, rate float64) string {
 	if remaining <= 0 {
 		return "00:00:00"
@@ -115,8 +113,8 @@ func ETA(remaining int64, rate float64) string {
 	if secs < 0 {
 		secs = 0
 	}
-	// Past 99 hours the ETA stops being a useful figure; cap it rather than
-	// print a field that widens the line.
+	// Past 99 hours the figure stops meaning anything, and letting it grow
+	// would widen the field, so it's capped.
 	if secs > 99*3600+59*60+59 {
 		return "99:59:59"
 	}
@@ -124,8 +122,8 @@ func ETA(remaining int64, rate float64) string {
 }
 
 // Truncate cuts s to at most width display columns without splitting a rune.
-// The bar is built from multi-byte block glyphs, so a byte-wise cut would put
-// half a character (an invalid sequence) on screen.
+// The bar is block glyphs, several bytes each, so a byte-wise cut would put
+// half a character on screen.
 func Truncate(s string, width int) string {
 	if width <= 0 {
 		return ""
@@ -145,10 +143,9 @@ func Truncate(s string, width int) string {
 	return b.String()
 }
 
-// LimitBadge names the active bandwidth caps, or returns the empty string when
-// neither direction is capped. Only the capped directions are named, so the
-// field stays short enough to survive a narrowing terminal and an unlimited
-// run shows nothing at all.
+// LimitBadge names the active bandwidth caps, or "" when neither direction is
+// capped. Naming only the capped directions keeps the field short enough to
+// survive a narrow terminal; an unlimited run shows nothing at all.
 func LimitBadge(st engine.Stats) string {
 	var b strings.Builder
 	b.WriteString("cap")
@@ -164,20 +161,17 @@ func LimitBadge(st engine.Stats) string {
 	return b.String()
 }
 
-// Render builds one complete sticky-line frame from an engine snapshot and a
-// caller-smoothed bytes/second rate, limited to width columns. It is pure: no
-// terminal, no clock, no state, so it is the piece the rendering tests drive
+// Render builds one sticky-line frame from an engine snapshot and a
+// caller-smoothed bytes/second rate, limited to width columns. It's pure — no
+// terminal, no clock, no state — which is why the rendering tests drive it
 // directly.
 //
-// Fields are appended in priority order — rate, then ETA, then worker count,
-// then piece count, then the active caps — so as the terminal narrows the least
-// useful fields drop first; then the bar shrinks; then a rune-safe cut
-// guarantees the line never reaches the last column.
+// Fields go in priority order: rate, ETA, workers, pieces, caps. Narrowing
+// drops the least useful first, then shrinks the bar, then cuts rune-safely.
 func Render(st engine.Stats, rate float64, width int) string {
-	// One column is deliberately left free. Writing into the final column
-	// puts many terminals into a "pending wrap" state, and the next byte
-	// would then move to the next row, which is exactly the smear this
-	// display must avoid.
+	// One column stays free: writing into the final column puts many
+	// terminals into "pending wrap", and the next byte moves to the next
+	// row — the exact smear this display exists to avoid.
 	budget := width - 1
 	if budget < 1 {
 		budget = 1
@@ -208,9 +202,9 @@ func Render(st engine.Stats, rate float64, width int) string {
 		return line
 	}
 
-	// Even the bar and the percentage overflow: shrink the bar to whatever
-	// room is left, then cut as a last resort. minBarCells keeps a cell or
-	// two of bar even if that means the percentage is cut.
+	// Even the bar and percentage overflow: shrink the bar to whatever room
+	// is left, then cut as a last resort. minBarCells keeps a cell or two of
+	// bar even when that means cutting into the percentage.
 	suffix := " " + percent
 	room := budget - utf8.RuneCountInString(suffix) - 2 // the two caps
 	if room < minBarCells {

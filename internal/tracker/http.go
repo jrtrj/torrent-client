@@ -16,7 +16,7 @@ import (
 	"torrent-client/internal/bencode"
 )
 
-// maxResponseBytes caps a tracker reply so a hostile or broken endpoint cannot
+// maxResponseBytes caps a tracker reply, so a hostile or broken endpoint can't
 // exhaust memory.
 const maxResponseBytes = 4 << 20
 
@@ -34,8 +34,8 @@ func NewHTTP(announceURL string) *HTTPTracker {
 	}
 }
 
-// Announce performs one announce. Transport failures and 5xx replies are
-// reported as transient errors so the retry policy can act on them.
+// Announce performs one announce. Transport failures and 5xx replies come back
+// as transient errors, so the retry policy can act on them.
 func (t *HTTPTracker) Announce(ctx context.Context, req AnnounceRequest) (AnnounceResponse, error) {
 	endpoint, err := t.buildURL(req)
 	if err != nil {
@@ -79,11 +79,9 @@ func (t *HTTPTracker) client() *http.Client {
 	return http.DefaultClient
 }
 
-// buildURL assembles the announce query. url.Values encodes with percent
-// escaping that is symmetric with standard form decoding, which is what
-// trackers use: the raw binary info-hash and peer-id round-trip intact even
-// when they contain '+' or a space, because those bytes are never emitted as
-// bare '+' or raw spaces.
+// buildURL assembles the announce query. url.Values escapes the way standard
+// form decoding expects, which is what trackers do, so a raw binary info-hash or
+// peer-id round-trips intact: no bare '+' and no raw spaces on the wire.
 func (t *HTTPTracker) buildURL(req AnnounceRequest) (string, error) {
 	base, err := url.Parse(t.URL)
 	if err != nil {
@@ -108,9 +106,8 @@ func (t *HTTPTracker) buildURL(req AnnounceRequest) (string, error) {
 	return base.String(), nil
 }
 
-// parseResponse decodes a tracker reply. The peers value is either a compact
-// binary blob or a list of dictionaries, and its key may be prefixed with the
-// requesting peer's id — both shapes are handled here.
+// parseResponse decodes a tracker reply. Peers come as a compact binary blob or a
+// list of dictionaries, under a key possibly prefixed with the requesting peer id.
 func parseResponse(body []byte) (AnnounceResponse, error) {
 	decoded, err := bencode.Decode(bytes.NewReader(body))
 	if err != nil {
@@ -206,8 +203,8 @@ func decodePeers(val any) ([]Peer, error) {
 	}
 }
 
-// decodePeers6 handles the IPv6 compact form: 18 bytes per peer (16-byte
-// address + 2-byte port).
+// decodePeers6 handles the IPv6 compact form: 18 bytes per peer (16-byte address
+// plus 2-byte port).
 func decodePeers6(val any) ([]Peer, error) {
 	s, ok := val.(string)
 	if !ok {

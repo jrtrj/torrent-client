@@ -1,9 +1,9 @@
-// Command seed is the demo seeder for the local swarm: it holds a fixture and
-// serves it over the real peer protocol so a download can be verified offline.
+// Command seed is the local swarm's fixture seeder: it serves a torrent's data
+// over the peer wire protocol so a download can be verified offline.
 //
-// It is a harness counterpart to cmd/torrent-client, not a general-purpose
-// server. The serving itself lives in internal/seed, the same package the real
-// client uses, so there is one upload implementation rather than two.
+// A harness counterpart to cmd/torrent-client, not a general server. Serving
+// lives in internal/seed, the package the real client uses, so there's one
+// upload implementation rather than two.
 package main
 
 import (
@@ -98,9 +98,8 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay 
 		trackerURL = urls[0]
 	}
 
-	// The same layout the client writes: a multi-file torrent lives under a
-	// directory named after it, so what was downloaded can be seeded back
-	// without rearranging it.
+	// The layout the client writes: a multi-file torrent lives under a directory
+	// named after it, so what was downloaded can be seeded back untouched.
 	root, err := content.OutputFor(meta, dataPath)
 	if err != nil {
 		return err
@@ -142,8 +141,8 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay 
 	if closer, ok := tr.(io.Closer); ok {
 		defer closer.Close()
 	}
-	// We hold every piece, so announce with left=0: the tracker counts us
-	// complete and hands our address to leechers straight away.
+	// We hold every piece, so announce left=0: the tracker counts us complete and
+	// hands our address to leechers right away.
 	resp, err := tr.Announce(ctx, tracker.AnnounceRequest{
 		InfoHash: meta.InfoHash,
 		PeerID:   peerID,
@@ -171,9 +170,9 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay 
 		return err
 	}
 
-	// Best-effort goodbye so the tracker drops us immediately. The deadline
-	// bounds a lost datagram: a UDP announce retries on its own schedule and
-	// must not hold up the exit.
+	// Best-effort goodbye so the tracker drops us immediately. The deadline caps a
+	// lost datagram: a UDP announce retries on its own schedule and must not hold
+	// up the exit.
 	goodbye, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, _ = tr.Announce(goodbye, tracker.AnnounceRequest{
@@ -208,8 +207,8 @@ func reannounce(ctx context.Context, tr tracker.Tracker, meta *metainfo.MetaInfo
 	}
 }
 
-// newPeerID builds an Azureus-style id: a client tag plus random bytes. The
-// bytes are arbitrary binary and the tracker encodes them as such.
+// newPeerID builds an Azureus-style id: a client tag plus random bytes. They're
+// arbitrary binary, and the tracker encodes them that way.
 func newPeerID() ([20]byte, error) {
 	var id [20]byte
 	copy(id[:], "-TC0001-")

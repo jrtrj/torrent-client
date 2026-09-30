@@ -8,11 +8,9 @@ import (
 	"unsafe"
 )
 
-// isTerminal reports whether f is a terminal. The ioctl is TCGETS: it fails
-// with ENOTTY on everything that is not a tty — a pipe, a regular file, and
-// also /dev/null, which is a character device. That last distinction is why
-// the trivial os.File.Stat().ModeCharDevice check is not good enough here:
-// it would classify /dev/null as a terminal and emit escapes into it.
+// isTerminal reports whether f is a terminal, via the TCGETS ioctl: it fails
+// with ENOTTY on everything that isn't a tty — pipes, regular files, and
+// /dev/null, which is a character device and would fool a ModeCharDevice check.
 func isTerminal(f *os.File) bool {
 	var termios syscall.Termios
 	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, f.Fd(),
@@ -20,8 +18,8 @@ func isTerminal(f *os.File) bool {
 	return errno == 0
 }
 
-// winsize mirrors struct winsize from <termios.h>, the payload of
-// TIOCGWINSZ. Field order and widths are the kernel ABI on Linux.
+// winsize mirrors struct winsize from <termios.h>: the payload of TIOCGWINSZ,
+// in the field order and widths the Linux kernel ABI uses.
 type winsize struct {
 	rows    uint16
 	cols    uint16
@@ -29,10 +27,9 @@ type winsize struct {
 	ypixels uint16
 }
 
-// terminalWidth asks the terminal how many columns it has. A zero column
-// count means the kernel has no size recorded (common for a fresh pty), which
-// is reported as "unknown" so the caller can fall back rather than truncate
-// the display to nothing.
+// terminalWidth asks the tty for its column count. Zero columns means the
+// kernel has no size recorded yet (a fresh pty often hasn't), so that's
+// reported as unknown and the caller falls back instead of truncating to nothing.
 func terminalWidth(f *os.File) (int, bool) {
 	var ws winsize
 	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, f.Fd(),

@@ -2,8 +2,6 @@ package tracker
 
 import "testing"
 
-// The transport switch is the only place the two wire protocols are told
-// apart: the engine keeps taking the Tracker interface.
 func TestNewRoutesByScheme(t *testing.T) {
 	tests := []struct {
 		name string

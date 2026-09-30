@@ -9,32 +9,30 @@ import (
 	"path/filepath"
 )
 
-// SidecarSuffix is appended to the output path to name the resume sidecar. The
-// sidecar therefore always sits next to the content it describes and can never
-// be mistaken for the content itself.
+// SidecarSuffix turns an output path into its resume sidecar's name. The
+// sidecar always sits beside the content it describes, so it can never be
+// mistaken for the content itself.
 const SidecarSuffix = ".resume"
 
-// SchemaVersion is the on-disk format version, written into every sidecar and
-// required to match on load. The layout may change between versions, so a
-// sidecar from another version is rejected rather than guessed at: a wrong
-// guess could adopt bytes that were never verified.
+// SchemaVersion is the on-disk format version. It goes into every sidecar and
+// has to match on load: the layout can change between versions, and guessing
+// could adopt bytes that were never verified.
 const SchemaVersion = 1
 
 var (
-	// ErrNoState means there is no sidecar for this output: a fresh download.
+	// ErrNoState means there's no sidecar for this output: a fresh download.
 	ErrNoState = errors.New("state: no resume sidecar")
-	// ErrMismatch means a sidecar exists but does not describe this download:
-	// another torrent, another output path, another schema version, a
-	// different torrent geometry, or bytes that are not a valid sidecar at
-	// all. It must never be trusted, so callers treat it exactly like
-	// ErrNoState and start fresh.
+	// ErrMismatch means a sidecar exists but isn't for this download — another
+	// torrent, another output path, another schema version, different
+	// geometry, or bytes that aren't a valid sidecar at all. It must never be
+	// trusted, so callers treat it exactly like ErrNoState and start fresh.
 	ErrMismatch = errors.New("state: resume sidecar does not match this download")
 )
 
-// State is one persisted resume record. It carries both halves of the key —
-// the torrent info-hash and the output path — so a sidecar that was copied,
-// renamed, or left over from a previous torrent at the same path is detected
-// as foreign instead of adopted.
+// State is one persisted resume record. It carries both halves of the key, the
+// torrent info-hash and the output path, so a sidecar that was copied, renamed
+// or left behind by an earlier torrent at the same path reads as foreign
+// instead of being adopted.
 type State struct {
 	Version     int    `json:"version"`
 	InfoHash    string `json:"info_hash"` // lower-case hex of the 20-byte hash
@@ -42,16 +40,15 @@ type State struct {
 	PieceLength int64  `json:"piece_length"`
 	TotalLength int64  `json:"total_length"`
 	Pieces      int    `json:"pieces"`
-	// Have is the verified-piece bitfield: one bit per piece, most
-	// significant bit first within each byte, padding bits zero. JSON
-	// renders it as base64.
+	// Have is the verified-piece bitfield, one bit per piece, most
+	// significant bit first in each byte, padding bits zero. JSON base64s it.
 	Have []byte `json:"have"`
 }
 
-// Store is the resume sidecar for one (torrent, output) pair. It performs no
-// I/O at construction; Load and Save do. Methods are not internally
-// synchronised: the engine serialises its calls, and the atomic-write test
-// shows a concurrent reader only ever sees a whole sidecar.
+// Store is the resume sidecar for one (torrent, output) pair. Construction
+// does no I/O; Load and Save do. Methods aren't internally synchronised — the
+// engine serialises its calls, and the atomic-write test shows a concurrent
+// reader only ever sees a whole sidecar.
 type Store struct {
 	path        string
 	infoHash    [20]byte
@@ -61,9 +58,8 @@ type Store struct {
 	pieces      int
 }
 
-// SidecarPath is where a given output path keeps its resume sidecar. The path
-// is cleaned so two spellings of the same file ("./out" and "out") share one
-// sidecar.
+// SidecarPath is where a given output path keeps its resume sidecar. Cleaning
+// means two spellings of the same file ("./out" and "out") share one sidecar.
 func SidecarPath(output string) string { return filepath.Clean(output) + SidecarSuffix }
 
 // Open returns the sidecar handle for output under the given torrent geometry.
@@ -79,12 +75,11 @@ func Open(output string, infoHash [20]byte, pieceLength, totalLength int64, piec
 	}
 }
 
-// Path is the sidecar's file path.
 func (s *Store) Path() string { return s.path }
 
-// Load reads and validates the sidecar. ErrNoState means there is none;
-// ErrMismatch means there is one but it describes something else, including
-// the case where it cannot be parsed. Callers treat both as "start fresh".
+// Load reads and validates the sidecar. ErrNoState means there isn't one;
+// ErrMismatch means there is but it describes something else, including when
+// it won't parse. Callers treat both as "start fresh".
 func (s *Store) Load() (*State, error) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -103,8 +98,8 @@ func (s *Store) Load() (*State, error) {
 	return &st, nil
 }
 
-// check enforces the keying and geometry rules. Every failure is ErrMismatch:
-// the file is not a resume record we are willing to trust.
+// check enforces the keying and geometry rules. Every failure is ErrMismatch —
+// whatever's on disk isn't a resume record we're willing to trust.
 func (s *Store) check(st *State) error {
 	if st.Version != SchemaVersion {
 		return fmt.Errorf("%w: schema version %d, want %d", ErrMismatch, st.Version, SchemaVersion)
@@ -123,8 +118,8 @@ func (s *Store) check(st *State) error {
 	if len(st.Have) != want {
 		return fmt.Errorf("%w: bitfield is %d bytes, want %d for %d pieces", ErrMismatch, len(st.Have), want, s.pieces)
 	}
-	// Pad bits past the last piece are part of the frame, not of the record;
-	// a set one means the writer and this reader disagree about the layout.
+	// Pad bits past the last piece belong to the frame, not the record, so a
+	// set one means the writer and this reader disagree about the layout.
 	if pad := s.pieces % 8; pad != 0 && len(st.Have) > 0 {
 		if mask := byte(1<<(8-pad) - 1); st.Have[len(st.Have)-1]&mask != 0 {
 			return fmt.Errorf("%w: padding bits set past the last piece", ErrMismatch)
@@ -133,10 +128,10 @@ func (s *Store) check(st *State) error {
 	return nil
 }
 
-// Save writes the verified-piece bitfield atomically: a temp file in the same
-// directory is written, fsynced and closed, then renamed over the sidecar, and
-// the directory is synced last. A reader therefore only ever sees a whole,
-// old-or-new sidecar, and a crash mid-write leaves the previous one intact.
+// Save writes the verified-piece bitfield atomically: temp file in the same
+// directory, written, fsynced, closed, renamed over the sidecar, then the
+// directory fsynced. A reader only ever sees a whole old-or-new sidecar, and a
+// crash mid-write leaves the previous one intact.
 func (s *Store) Save(have []byte) error {
 	if want := (s.pieces + 7) / 8; len(have) != want {
 		return fmt.Errorf("state: bitfield is %d bytes, want %d for %d pieces", len(have), want, s.pieces)
@@ -176,14 +171,14 @@ func (s *Store) Save(have []byte) error {
 		os.Remove(tmpName)
 		return fmt.Errorf("state: close temp sidecar: %w", err)
 	}
-	// Rename is the atomic step: up to here the real sidecar is untouched.
+	// The rename is the atomic step — up to here the real sidecar is untouched.
 	if err := os.Rename(tmpName, s.path); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("state: rename sidecar into place: %w", err)
 	}
-	// Sync the directory so the new name is durable. Without this a crash
-	// could lose the rename and leave the older sidecar, which is safe but
-	// would silently resume less than we reported.
+	// Sync the directory so the new name is durable. Without this, a crash
+	// could lose the rename and leave the older sidecar: safe, but it resumes
+	// less than we reported.
 	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
@@ -191,8 +186,8 @@ func (s *Store) Save(have []byte) error {
 	return nil
 }
 
-// Remove deletes the sidecar. A missing sidecar is not an error, so removing it
-// twice is fine.
+// Remove deletes the sidecar. A missing one isn't an error, so calling it twice
+// is fine.
 func (s *Store) Remove() error {
 	if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("state: remove %s: %w", s.path, err)

@@ -14,35 +14,31 @@ import (
 	"torrent-client/internal/wire"
 )
 
-// stoppedAnnounceTimeout bounds the goodbye announce on every shutdown path.
-// The download context is already cancelled by the time it runs, so this uses
-// its own deadline: a tracker that is down must not hold the process open
-// after Ctrl-C.
+// stoppedAnnounceTimeout bounds the shutdown goodbye. The download context is
+// already cancelled by then, so the announce carries its own deadline — a dead
+// tracker must not hold the process open after Ctrl-C.
 const stoppedAnnounceTimeout = 3 * time.Second
 
-// restore adopts the pieces a resume sidecar claims and the content file still
-// proves. The sidecar is never trusted by itself: every claimed piece is
-// re-hashed from disk, and one whose bytes no longer match is dropped so the
-// download fetches it again. This is what stops a modified or truncated output
-// file — or a sidecar copied from another run — from resuming into corrupt
-// bytes. Only the pieces that pass are marked verified, so the scheduler never
-// asks a peer for them again.
+// restore adopts the pieces the resume sidecar claims and the content file
+// still proves. The sidecar is never trusted on its own: each claimed piece is
+// re-hashed from disk and dropped if the bytes changed, which keeps a tampered
+// or truncated output file — or a sidecar copied from another run — from
+// resuming into corrupt bytes. Only pieces that pass are marked verified.
 func (e *Engine) restore(store *storage.Storage) error {
 	st, err := e.resume.Load()
 	switch {
 	case errors.Is(err, state.ErrNoState):
 		return nil
 	case err != nil:
-		// A sidecar that is unreadable, foreign, or from another schema is not
-		// fatal: the run starts fresh and overwrites it.
+		// Unreadable, foreign, or from another schema isn't fatal: start fresh
+		// and overwrite it.
 		e.logf("engine: ignoring unusable resume sidecar: %v", err)
 		return nil
 	}
 
-	// Hashing the pieces touches the disk and can take a while, so the reads
-	// happen here and the adoption below takes the scheduler lock only to
-	// publish the result. The upload path reads the held-piece bitfield under
-	// that same lock, so it never sees a half-adopted set.
+	// Re-hashing touches the disk and can take a while, so the reads happen out
+	// here and the lock is taken only to publish the result. The upload path
+	// reads the bitfield under that same lock, so a half-adopted set never shows.
 	var adopted []int
 	dropped := 0
 	for i := 0; i < e.pieceCount; i++ {
@@ -77,14 +73,10 @@ func (e *Engine) restore(store *storage.Storage) error {
 // persist writes the verified-piece bitfield to the sidecar. It runs after
 // each piece verifies, so a SIGKILL that never reaches a clean shutdown still
 // resumes with everything verified up to the kill. The bitfield is snapshotted
-// under the scheduler lock and the file is written outside it, so a slow disk
-// never stalls scheduling.
-//
-// The write rate is at most one small sidecar write per verified piece: the
-// file is a JSON header plus one bit per piece, so for 256 KiB pieces that is
-// under a kilobyte of I/O per 256 KiB downloaded, four writes per mebibyte.
-// That is negligible next to the piece's own bytes, and it bounds what an
-// unclean kill can lose to the pieces that were in flight at that instant.
+// under the scheduler lock and written outside it, so a slow disk never stalls
+// scheduling. The file is a JSON header plus one bit per piece, so 256 KiB
+// pieces cost under a kilobyte of I/O each — four writes per mebibyte, nothing
+// beside the piece's own bytes, and a cap on what an unclean kill can lose.
 func (e *Engine) persist() {
 	if e.resume == nil {
 		return
@@ -107,11 +99,9 @@ func (e *Engine) persist() {
 	}
 }
 
-// finalizeState flushes on the way out in the order that keeps resume safe:
-// the content file is synced first and the sidecar that records which pieces
-// verified is written last. The sidecar therefore can never name a piece
-// whose bytes were not at least handed to the kernel before the record was
-// made.
+// finalizeState flushes on the way out in the order resume needs: sync the
+// content file first, write the piece record last. The sidecar can then never
+// name a piece whose bytes weren't handed to the kernel before the record.
 func (e *Engine) finalizeState() {
 	if e.resume == nil {
 		return
@@ -124,8 +114,8 @@ func (e *Engine) finalizeState() {
 	e.persist()
 }
 
-// announceStopped is the best-effort goodbye on shutdown. It never blocks past
-// stoppedAnnounceTimeout, so a dead tracker cannot hang the process.
+// announceStopped is the best-effort goodbye. It never blocks past
+// stoppedAnnounceTimeout, so a dead tracker can't hang the process.
 func (e *Engine) announceStopped() {
 	if e.cfg.Tracker == nil {
 		return

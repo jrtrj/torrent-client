@@ -179,9 +179,9 @@ type fetchResult struct {
 	err   error
 }
 
-// fetchWhileGrowing connects to srv, records every have it is told about, and
-// fetches every piece as it becomes available, byte-checking as it goes. It
-// returns once it holds every piece or the deadline passes.
+// fetchWhileGrowing connects to srv, notes every have it is told about, and
+// fetches each piece as it appears, byte-checking as it goes. It returns once
+// it holds every piece or the deadline passes.
 func fetchWhileGrowing(srv *Server, meta *metainfo.MetaInfo, deadline time.Time) fetchResult {
 	var res fetchResult
 	conn, err := net.Dial("tcp", srv.Addr().String())
@@ -318,11 +318,11 @@ func fetchWhileGrowing(srv *Server, meta *metainfo.MetaInfo, deadline time.Time)
 	return res
 }
 
-// TestServesPiecesWhileDownloading runs a real engine and the seed server in
-// one process, sharing a content store: the engine is downloading from a slow
-// peer while another peer fetches verified pieces from us. It asserts the
-// fetcher got byte-correct data, that this happened while the download was
-// still running, and that the name/IP layer never races (run under -race).
+// A real engine and the seed server run in one process over a shared content
+// store: the engine downloads from a slow peer while another peer fetches
+// verified pieces from us. The test asserts byte-correct data reached the
+// fetcher, that this happened while the download was still running, and that
+// nothing on the shared store races (run under -race).
 func TestServesPiecesWhileDownloading(t *testing.T) {
 	const pieces = 6
 	data := testPayload(t, pieces*testPieceLength)

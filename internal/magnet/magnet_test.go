@@ -78,8 +78,8 @@ func TestParseCollectsTrackersAndDisplayName(t *testing.T) {
 	}
 }
 
-// The tracker list may arrive as one comma- or repeat-separated value; the
-// repeat form above is the common one, and blank entries are dropped.
+// Trackers may arrive as one comma-separated value or as repeated tr= entries;
+// the repeat form above is the common one, and blank entries are dropped.
 func TestParseDropsBlankTrackers(t *testing.T) {
 	m, err := Parse("magnet:?xt=urn:btih:" + hexHash() + "&tr=&tr=http://t/announce&tr=")
 	if err != nil {

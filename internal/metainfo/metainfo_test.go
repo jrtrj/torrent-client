@@ -54,8 +54,8 @@ func parse(t *testing.T, torrent []byte) *MetaInfo {
 	return m
 }
 
-// The info-hash is SHA-1 over the literal bytes of the info dictionary. This
-// test writes those bytes by hand so nothing about the parser can disguise a
+// The info-hash is SHA-1 over the literal bytes of the info dictionary, so
+// those bytes are written out by hand here: the parser gets nowhere to hide a
 // re-encoding mistake.
 func TestParseHashesLiteralInfoBytes(t *testing.T) {
 	pieceHash := strings.Repeat("\xab", 20)

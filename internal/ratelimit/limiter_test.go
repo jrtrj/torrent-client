@@ -26,8 +26,8 @@ func throughput(t *testing.T, l *Limiter, total, chunk int) float64 {
 	return float64(total) / elapsed
 }
 
-// The cap has to hold over a real transfer, in both directions of the band:
-// a limiter that ignores the rate is as wrong as one that stalls forever.
+// The cap has to hold over a real transfer, and in both directions: a limiter
+// that ignores the rate is as wrong as one that stalls forever.
 func TestCapHoldsOverAMeasuredTransfer(t *testing.T) {
 	const rate = int64(512 * 1024)
 	const total = 1 << 20 // 1 MiB at 512 KiB/s is two seconds
@@ -67,9 +67,9 @@ func TestUnlimitedRateNeverBlocks(t *testing.T) {
 	}
 }
 
-// A limiter that has been idle may spend its burst allowance at once, but no
-// more: the schedule may lag the clock by one burst window, not by however
-// long the limiter sat unused.
+// An idle limiter may spend its burst allowance at once and no more: the
+// schedule lags the clock by one burst window, not by however long it sat
+// unused.
 func TestIdleCreditStopsAtTheBurstAllowance(t *testing.T) {
 	// At 8 MiB/s the burst allowance (capped at 1 MiB) is 125 ms, so a short
 	// sleep already dwarfs it.
@@ -97,12 +97,12 @@ func TestIdleCreditStopsAtTheBurstAllowance(t *testing.T) {
 	}
 }
 
-// A cancelled download must not sit in the bucket: Wait has to return as soon
-// as the context is done, and the goroutine that was waiting has to go away.
+// A cancelled download must not sit in the bucket: Wait returns as soon as the
+// context is done, and the waiting goroutine goes away.
 func TestWaitReturnsOnCancelWithoutLeakingAGoroutine(t *testing.T) {
 	l := New(1024) // 1 KiB/s: 1 MiB fills the schedule for a quarter of an hour
-	// The first reservation is admitted at once (it starts the schedule), so
-	// it is spent here to put the next one genuinely far in the future.
+	// The first reservation starts the schedule and is admitted at once, so it
+	// is spent here to push the next one genuinely far into the future.
 	if err := l.Wait(context.Background(), 1<<20); err != nil {
 		t.Fatalf("prime: %v", err)
 	}
@@ -112,8 +112,8 @@ func TestWaitReturnsOnCancelWithoutLeakingAGoroutine(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- l.Wait(ctx, 16*1024) }()
 
-	// Let the waiter reach the sleep before cancelling, so the test exercises
-	// the blocked path rather than a lucky race.
+	// Let the waiter reach the sleep before cancelling: we want the blocked
+	// path exercised, not a lucky race.
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 
@@ -126,8 +126,8 @@ func TestWaitReturnsOnCancelWithoutLeakingAGoroutine(t *testing.T) {
 		t.Fatal("Wait did not return after the context was cancelled")
 	}
 
-	// The waiting goroutine has to be gone. Other goroutines come and go with
-	// the test runtime, so settle briefly rather than reading the count once.
+	// The waiting goroutine has to be gone, and unrelated ones come and go with
+	// the test runtime, so settle briefly instead of trusting a single count.
 	deadline := time.Now().Add(5 * time.Second)
 	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)

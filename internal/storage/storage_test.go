@@ -8,7 +8,7 @@ import (
 )
 
 func TestWritePieceAndReadBlock(t *testing.T) {
-	// A missing parent directory must be created.
+	// The "nested" directory doesn't exist yet, and Open has to create it.
 	path := filepath.Join(t.TempDir(), "nested", "data.bin")
 	s, err := Open(path, 4, 10)
 	if err != nil {

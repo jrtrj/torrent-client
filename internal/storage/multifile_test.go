@@ -9,9 +9,8 @@ import (
 )
 
 // multiFileSpec is a small tree whose file boundaries deliberately land inside
-// pieces and blocks. That straddling case is the whole difficulty of
-// multi-file support: a piece can cover the tail of one file and the head of
-// the next.
+// pieces and blocks — the case that makes multi-file support hard: one piece
+// covering the tail of a file and the head of the next.
 func multiFileSpec() ([]FileSpec, int64) {
 	return []FileSpec{
 		{Path: []string{"a.bin"}, Length: 5},
@@ -20,8 +19,8 @@ func multiFileSpec() ([]FileSpec, int64) {
 	}, 25
 }
 
-// writeStream fills the store with the byte pattern 0,1,2,... so every file can
-// be checked against its exact slice of the stream.
+// writeStream fills the store with bytes 0,1,2,... so every file can be checked
+// against its exact slice of the stream.
 func writeStream(t *testing.T, s *Storage, total int64, pieceLength int) []byte {
 	t.Helper()
 	stream := make([]byte, total)
@@ -58,8 +57,8 @@ func TestMultiFileWritesEachFileAtItsSliceOfTheStream(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Every file must hold exactly its slice, including the one in the
-	// subdirectory, and nothing may be left over from another file.
+	// Each file holds exactly its slice, the nested one included, and nothing
+	// bleeds over from its neighbours.
 	want := []struct {
 		path string
 		data []byte
@@ -110,8 +109,8 @@ func TestMultiFileReadBlockStraddlesFileBoundaries(t *testing.T) {
 	}
 }
 
-// A hostile .torrent can name a file anything, including a traversal. Nothing
-// may be created, inside or outside the output directory, when one is refused.
+// A hostile .torrent can name a file anything, traversals included. When one
+// is refused, nothing may be created inside or outside the output directory.
 func TestMultiFileRefusesPathsThatEscapeTheOutputDirectory(t *testing.T) {
 	cases := []struct {
 		name string
@@ -149,8 +148,8 @@ func TestMultiFileRejectsAFileListThatContradictsTheLength(t *testing.T) {
 	}
 }
 
-// Thousands of files would exhaust the process's descriptors, so the handle
-// cache evicts. Eviction must not corrupt anything.
+// Thousands of files would exhaust the process's descriptors, which is why the
+// handle cache evicts. Evicting must not corrupt anything.
 func TestMultiFileSurvivesMoreFilesThanTheHandleCache(t *testing.T) {
 	dir := t.TempDir()
 	const n = maxOpenFiles * 3
@@ -186,8 +185,8 @@ func TestMultiFileSurvivesMoreFilesThanTheHandleCache(t *testing.T) {
 }
 
 // A single-file torrent is the degenerate case of the same mapping: one file
-// covering the whole stream. Keeping it that way is what stops the download,
-// resume and seed paths needing two code paths.
+// covering the whole stream. Keeping it that way is what spares the download,
+// resume and seed paths from needing two code paths.
 func TestSingleFileIsOneSpanOfTheSameMapping(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "one.bin")
 	s, err := Open(path, 8, 25)

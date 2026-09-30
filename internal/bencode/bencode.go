@@ -2,11 +2,10 @@
 // responses, and peer messages.
 //
 // github.com/jackpal/bencode-go is the one third-party module this project
-// allows. Wrapping it here keeps that fact in a single place: the rest of the
-// tree imports this package and never the module directly. The codec's
-// round-trip behaviour — in particular that the raw info dictionary must
-// survive decoding so the info-hash stays exact — is pinned by the bencode
-// research ticket.
+// allows. Wrapping it keeps that in one place: the rest of the tree imports
+// this package and never the module directly. The round-trip behaviour — the
+// raw info dictionary surviving decode, so the info-hash stays exact — is
+// pinned by the bencode research ticket.
 package bencode
 
 import (
@@ -16,7 +15,7 @@ import (
 )
 
 // RawMessage is a bencoded fragment kept as its original bytes. Capturing the
-// info dictionary this way is what makes an info-hash reproducible.
+// info dictionary this way is what makes the info-hash reproducible.
 type RawMessage = codec.RawMessage
 
 // Decode reads a single bencoded value from r.

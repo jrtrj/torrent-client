@@ -9,8 +9,7 @@ import (
 	"time"
 )
 
-// Peer is one swarm member: an address we can dial over the peer wire
-// protocol.
+// Peer is one swarm member: an address we can dial over the peer wire protocol.
 type Peer struct {
 	IP   net.IP
 	Port uint16
@@ -44,8 +43,8 @@ type AnnounceRequest struct {
 	NumWant    int
 }
 
-// AnnounceResponse is the decoded reply: the peers to try plus the tracker's
-// view of the swarm.
+// AnnounceResponse is the decoded reply: peers to try, and the tracker's view of
+// the swarm.
 type AnnounceResponse struct {
 	Interval    time.Duration
 	MinInterval time.Duration
@@ -70,9 +69,9 @@ type Error struct {
 func (e *Error) Error() string { return e.Err.Error() }
 func (e *Error) Unwrap() error { return e.Err }
 
-// IsFatal reports whether err is a tracker error that retrying cannot fix.
-// Unknown error types are treated as transient, because a download should not
-// die over an unclassified hiccup.
+// IsFatal reports whether err is a tracker error retrying can't fix. Unknown
+// error types count as transient — a download shouldn't die on an unclassified
+// hiccup.
 func IsFatal(err error) bool {
 	var te *Error
 	return errors.As(err, &te) && !te.Transient

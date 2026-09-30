@@ -13,9 +13,9 @@ import (
 	"torrent-client/internal/engine"
 )
 
-// A pipe is not a terminal, so the dashboard must take the plain path: events
-// become ordinary lines and no escape sequence ever reaches the stream. This is
-// also the path the end-to-end tests read, which is why it must stay plain.
+// A pipe isn't a terminal, so the dashboard takes the plain path: events become
+// ordinary lines and no escape sequence ever reaches the stream. This is also
+// the path the end-to-end tests read, which is why it has to stay plain.
 func TestPlainStreamIsNotAnimatedAndWritesNoEscapes(t *testing.T) {
 	var buf bytes.Buffer
 	d := New(&buf)
@@ -47,8 +47,8 @@ func TestRegularFileIsNotAnimated(t *testing.T) {
 	}
 }
 
-// /dev/null is a character device, so the naive ModeCharDevice check would call
-// it a terminal and drive it with escapes. The ioctl must reject it.
+// /dev/null is a character device, so a naive ModeCharDevice check would call it
+// a terminal and drive it with escapes. The ioctl has to reject it.
 func TestCharacterDeviceIsNotATerminal(t *testing.T) {
 	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
@@ -61,8 +61,8 @@ func TestCharacterDeviceIsNotATerminal(t *testing.T) {
 	}
 }
 
-// Callers start Run unconditionally, so on a stream that cannot animate it has
-// to return rather than block until the context ends.
+// Callers start Run unconditionally, so on a stream that can't animate it has to
+// return rather than block until the context ends.
 func TestRunReturnsImmediatelyOnAPlainStream(t *testing.T) {
 	var buf bytes.Buffer
 	d := New(&buf)
@@ -82,8 +82,8 @@ func TestRunReturnsImmediatelyOnAPlainStream(t *testing.T) {
 	}
 }
 
-// progressSource is a fixed snapshot, so a frame only changes if the renderer
-// or the rate estimator changes it.
+// progressSource is a fixed snapshot: a frame only changes if the renderer or
+// the rate estimator changes it.
 func progressSource(st engine.Stats) func() engine.Stats {
 	return func() engine.Stats { return st }
 }
@@ -107,7 +107,7 @@ func TestTermWidthFallsBackFromColumnsToTheDefault(t *testing.T) {
 	}
 }
 
-// The animated path needs a terminal, which a test does not have. Flipping the
+// The animated path needs a terminal, which a test doesn't have. Flipping the
 // capability flag the constructor would have set on a real tty exercises the
 // same code without a pty.
 func TestAnimatedPathPaintsInPlaceAndLeavesACleanLine(t *testing.T) {
@@ -221,10 +221,9 @@ func TestClosedDashboardStopsPainting(t *testing.T) {
 }
 
 // The deadlock regression. The engine invokes its log callback from under its
-// own lock, so that callback must take the dashboard's lock; meanwhile the
-// redraw loop takes the dashboard's lock and calls back into the engine's
-// Stats. Holding one lock across the other's call inverts them and hangs a real
-// download on any animated terminal. This reproduces the exact ordering and
+// own lock, and the redraw loop takes the dashboard's lock then calls back into
+// engine.Stats: hold one lock across the other's call and they invert, hanging a
+// real download on any animated terminal. This reproduces the ordering and
 // fails by timing out if the inversion comes back.
 func TestEventUnderTheSourceLockDoesNotDeadlock(t *testing.T) {
 	var engineMu sync.Mutex
@@ -253,8 +252,8 @@ func TestEventUnderTheSourceLockDoesNotDeadlock(t *testing.T) {
 		}
 	}()
 
-	// The redraw side, driven directly rather than through the ticker so the
-	// two lock orderings actually collide instead of racing a 250ms clock.
+	// The redraw side, driven directly rather than through the ticker, so the
+	// two lock orderings actually collide instead of racing the 250ms clock.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

@@ -27,23 +27,23 @@ type PeerStat struct {
 	State string
 }
 
-// Stats is a point-in-time snapshot of a download. It is plain data with no
-// engine handles in it, so the dashboard, resume, and seeding tickets can
-// consume it without reaching into the engine.
+// Stats is a point-in-time snapshot of a download. Plain data, no engine
+// handles, so the dashboard, resume and seeding code can consume it without
+// reaching into the engine.
 type Stats struct {
 	Pieces     int
 	PiecesDone int
 	BytesTotal int64
 	// BytesDone counts verified bytes only.
 	BytesDone int64
-	// BytesIn counts every block byte accepted, including data later thrown
-	// away by a failed hash check.
+	// BytesIn counts every accepted block byte, including data a failed hash
+	// check later throws away.
 	BytesIn int64
 
 	BlocksRequested int64
 	BlocksReceived  int64
-	// BlocksDuplicate counts blocks that arrived for bytes already held;
-	// stalled blocks were re-issued and answered twice.
+	// BlocksDuplicate counts blocks that arrived for bytes already held: stalled
+	// blocks re-issued and answered twice.
 	BlocksDuplicate int64
 	// BlocksStalled counts requests that expired unanswered.
 	BlocksStalled int64
@@ -51,34 +51,32 @@ type Stats struct {
 	PeersDropped  int64
 	// PeersUsed counts connected peers that delivered at least one block.
 	PeersUsed int
-	// PeersActive counts peers with work in the request pipeline right now;
-	// PeersMaxActive is the session peak of that number.
+	// PeersActive is peers with work in the pipeline right now; PeersMaxActive
+	// is the session peak of that number.
 	PeersActive    int
 	PeersMaxActive int
 
-	// MaxDownRate and MaxUpRate are the configured caps in bytes per second;
-	// zero means unlimited. The engine owns the download cap and reports it
-	// here. The upload cap belongs to whoever runs the inbound listener, so a
-	// caller that wants it displayed fills MaxUpRate into the snapshot it
-	// hands the dashboard.
+	// MaxDownRate and MaxUpRate are the configured caps in bytes per second,
+	// zero meaning unlimited. The download cap is the engine's and is reported
+	// here; the upload cap belongs to whoever runs the inbound listener, so a
+	// caller that wants it displayed fills in MaxUpRate.
 	MaxDownRate int64
 	MaxUpRate   int64
 
 	// Blacklisted lists peer addresses dropped for the session.
 	Blacklisted []string
 	Peers       []PeerStat
-	// Have is a copy of the bitfield of verified pieces.
+	// Have is a copy of the verified-piece bitfield.
 	Have []byte
 }
 
-// Meta is the torrent this engine is downloading. It is fixed for the engine's
-// life, so the upload path can read piece sizes and hashes from it.
+// Meta is the torrent this engine is downloading. Fixed for the engine's life,
+// so the upload path can read piece sizes and hashes from it.
 func (e *Engine) Meta() *metainfo.MetaInfo { return e.meta }
 
-// Have reports whether piece index has been downloaded, hash-verified, and
-// written, and so can be uploaded. It takes the scheduler's lock, so it is
-// safe to call from the upload path while Run is going; it returns false for
-// every piece until the download verifies them.
+// Have reports whether piece index has been downloaded, hash-verified and
+// written, so it can be uploaded. Takes the scheduler's lock, so it's safe
+// from the upload path while Run is going; false until a piece verifies.
 func (e *Engine) Have(index int) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -86,8 +84,8 @@ func (e *Engine) Have(index int) bool {
 }
 
 // HaveBitfield returns a copy of the verified-piece bitfield, so the upload
-// path can advertise everything it holds in one snapshot. Safe to call while
-// Run is going.
+// path can advertise everything it holds in one snapshot. Safe while Run is
+// going.
 func (e *Engine) HaveBitfield() []byte {
 	e.mu.Lock()
 	defer e.mu.Unlock()

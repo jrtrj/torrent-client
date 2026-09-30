@@ -130,8 +130,8 @@ func TestMessageRoundTrip(t *testing.T) {
 			if !tt.same(tt.msg, got) {
 				t.Fatalf("round trip = %+v, want %+v", got, tt.msg)
 			}
-			// A second read of the same stream must be empty, which catches a
-			// length prefix that does not match the payload.
+			// Decode the frame a second time: it has to parse cleanly, which
+			// catches a length prefix that does not match the payload.
 			if _, err := Decode(bytes.NewReader(frame)); err != nil {
 				t.Fatalf("re-decode: %v", err)
 			}
@@ -154,7 +154,7 @@ func TestKeepAliveIsAnEmptyFrame(t *testing.T) {
 }
 
 func TestDecodeRejectsOversizedFrame(t *testing.T) {
-	// A length prefix alone, a few bytes over the cap: the payload is never read.
+	// Just a length prefix, a few bytes over the cap: the payload is never read.
 	n := uint32(MaxMessageLength) + 8
 	frame := []byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
 	if _, err := Decode(bytes.NewReader(frame)); err == nil {

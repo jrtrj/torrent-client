@@ -13,8 +13,7 @@ import (
 	"time"
 )
 
-// BEP 15 protocol words. The byte layouts below are fixed-offset big-endian
-// binary; there is no bencoding anywhere in this transport.
+// BEP 15 is fixed-offset big-endian binary; no bencoding anywhere in this transport.
 //
 //	CONNECT request  (16 bytes):  0:8 64-bit magic protocol id
 //	                              8:12 32-bit action 0
@@ -48,7 +47,7 @@ import (
 //	                             requested hash
 //	ERROR response (8+n):         0:4 action 3, 4:8 transaction id, then text
 const (
-	udpProtocolID = 0x41727101980 // the CONNECT packet's magic "protocol id"
+	udpProtocolID = 0x41727101980 // magic "protocol id" every CONNECT packet opens with
 
 	udpActionConnect  = 0
 	udpActionAnnounce = 1
@@ -56,10 +55,9 @@ const (
 	udpActionError    = 3
 )
 
-// The bencode event spelling used by AnnounceRequest maps onto BEP 15's fixed
-// numeric codes. Zero is "no event", which is what a periodic re-announce and
-// the first announce (the engine always sends EventStarted) would otherwise
-// leave behind.
+// AnnounceRequest's bencode event names map onto BEP 15's fixed numeric codes.
+// Zero is "no event" — what a periodic re-announce and an unset Event both
+// turn into.
 const (
 	udpEventNone      = 0
 	udpEventCompleted = 1
@@ -67,8 +65,8 @@ const (
 	udpEventStopped   = 3
 )
 
-// Packet lengths, byte-exact. The request lengths are what we emit; the
-// response minimums are what we refuse to interpret anything shorter than.
+// Byte-exact packet lengths. Requests are what we emit; the response minimums
+// are the shortest datagrams we'll try to decode.
 const (
 	udpConnectRequestLen  = 16
 	udpConnectResponseLen = 16
@@ -80,17 +78,15 @@ const (
 )
 
 // connectionIDTTL is how long a connection id is reused before we pay for a
-// fresh CONNECT. BEP 15 only promises validity for about a minute, so we
-// refresh on that boundary instead of risking an announce the tracker drops
-// as stale.
+// fresh CONNECT. BEP 15 only promises validity for about a minute; refreshing
+// on that boundary beats an announce dropped as stale.
 const connectionIDTTL = time.Minute
 
-// udpRetry bounds one request/response exchange. BEP 15's own backoff starts
-// at 15s and doubles to 384s over 8 attempts (~8 minutes), which is far too
-// long for a client to sit on one dead tracker: the engine re-announces on
-// its own schedule and would rather fail fast and try the next announce URL.
-// We keep the doubling shape but start lower and cap every wait at 15s over 5
-// attempts, so one request is bounded at 2+4+8+15+15 = 44s.
+// udpRetry bounds one request/response exchange. BEP 15's own backoff starts at
+// 15s, doubling to 384s over 8 attempts — a hell of a long wait to sit on one
+// dead tracker when the engine re-announces on its own schedule and would rather
+// fail fast and try the next announce URL. Cap every wait at 15s over 5 attempts:
+// 2+4+8+15+15 = 44s.
 type udpRetry struct {
 	Attempts int
 	Base     time.Duration
@@ -109,8 +105,8 @@ func (p udpRetry) timeout(attempt int) time.Duration {
 	return d
 }
 
-// defaultUDPRetry is the capped policy described on udpRetry: 44s worst case
-// for a single request, against BEP 15's ~8 minutes.
+// defaultUDPRetry is the capped policy udpRetry describes: 44s worst case for
+// one request, against BEP 15's ~8 minutes.
 var defaultUDPRetry = udpRetry{Attempts: 5, Base: 2 * time.Second, Max: 15 * time.Second}
 
 // Scrape is one info-hash's swarm counters from a BEP 15 scrape.
@@ -122,19 +118,17 @@ type Scrape struct {
 
 // UDPTracker announces with the BEP 15 UDP protocol.
 //
-// Socket shape: one connected socket per tracker, dialled lazily and kept for
-// the tracker's whole life. A tracker identifies a peer by its source address
-// and port, so re-dialling from a fresh ephemeral port between announces would
-// look like a different peer; a stable source port keeps every announce in the
-// same slot. A connected UDP socket also makes the kernel drop datagrams from
-// anyone but the dialled tracker address, which is a second layer under the
-// transaction-id check in exchange.
+// One connected socket per tracker, dialled lazily and kept for its whole life:
+// a tracker identifies a peer by source address and port, so announcing from a
+// fresh ephemeral port each time would look like a different peer. Being
+// connected also makes the kernel drop datagrams from anyone but the dialled
+// address — a second layer under the transaction-id check in exchange.
 type UDPTracker struct {
 	URL string
 
 	addrString string
 	retry      udpRetry
-	key        uint32 // stable announce key, identifies us if our IP changes
+	key        uint32 // stable announce key: identifies us if our IP changes
 
 	mu      sync.Mutex
 	conn    *net.UDPConn
@@ -142,8 +136,8 @@ type UDPTracker struct {
 	connExp time.Time
 }
 
-// NewUDP returns a BEP 15 transport for one udp:// announce URL. The tracker is
-// contacted lazily, so a name that does not resolve yet is not fatal here.
+// NewUDP returns a BEP 15 transport for one udp:// announce URL. Contact is
+// lazy, so a name that doesn't resolve yet isn't fatal here.
 func NewUDP(announceURL string) (*UDPTracker, error) {
 	u, err := url.Parse(announceURL)
 	if err != nil {
@@ -162,8 +156,8 @@ func NewUDP(announceURL string) (*UDPTracker, error) {
 	return &UDPTracker{URL: announceURL, addrString: u.Host, retry: defaultUDPRetry, key: key}, nil
 }
 
-// Close releases the socket. Announce is unusable afterwards; the CLI calls
-// this when it moves on to the next announce URL.
+// Close releases the socket; Announce is unusable after it. The CLI calls this
+// when it moves on to the next announce URL.
 func (t *UDPTracker) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -204,9 +198,8 @@ func (t *UDPTracker) Announce(ctx context.Context, req AnnounceRequest) (Announc
 	return parseUDPAnnounce(resp, t.URL)
 }
 
-// Scrape asks for one info-hash's swarm counters. It is the third leg of the
-// BEP 15 flow; nothing in the client needs it, but the transport is the only
-// place that can speak it, so it is exposed here rather than re-derived later.
+// Scrape asks for one info-hash's swarm counters, the third leg of the BEP 15
+// flow. Nothing calls it yet, but only this transport can speak it.
 func (t *UDPTracker) Scrape(ctx context.Context, infoHash [20]byte) (Scrape, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -295,15 +288,14 @@ func (t *UDPTracker) invalidate() {
 	t.connExp = time.Time{}
 }
 
-// exchange sends req and returns the first reply that carries our transaction
-// id and the action we expect. It retransmits on timeout with the capped
-// backoff, and deliberately ignores anything else that arrives: a datagram
-// with a foreign transaction id is either a stale reply or a spoof, and acting
-// on it would let anyone who can reach our port steer the swarm. Runt or
-// malformed datagrams are dropped the same way rather than parsed.
+// exchange sends req and returns the first reply carrying our transaction id and
+// the expected action, retransmitting on timeout with the capped backoff.
+// Everything else gets ignored on purpose: a foreign transaction id is a stale
+// reply or a spoof, and acting on it lets anyone who can reach our port steer
+// the swarm. Runts and malformed datagrams get dropped, not parsed.
 //
-// Deadlines are set per packet, right before each write and read, so a slow
-// exchange never shortens the window available to the next one.
+// Deadlines are set per packet, just before each write and read, so a slow
+// exchange never shortens the next one's window.
 func (t *UDPTracker) exchange(ctx context.Context, conn *net.UDPConn, req []byte, action uint32) ([]byte, error) {
 	tid := binary.BigEndian.Uint32(req[12:16])
 
@@ -386,10 +378,9 @@ func (t *UDPTracker) transient(err error) error {
 	return &Error{Transient: true, Err: fmt.Errorf("udp tracker %s: %w", t.URL, err)}
 }
 
-// ctxErr reports the context's cancellation, including a deadline that has
-// passed but whose timer has not yet been observed. The socket's own timeout
-// is clamped to the context deadline, so the two fire together and this
-// resolves that tie in favour of the real cause.
+// ctxErr reports the context's cancellation, including a deadline already passed
+// but not yet observed. The socket timeout is clamped to that deadline, so both
+// fire together and this tie goes to the real cause.
 func ctxErr(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -400,8 +391,8 @@ func ctxErr(ctx context.Context) error {
 	return nil
 }
 
-// connectPacket builds the CONNECT request: the magic protocol id, action 0,
-// and our transaction id.
+// connectPacket builds the 16-byte CONNECT request: magic protocol id, action 0,
+// our transaction id.
 func connectPacket(tid uint32) []byte {
 	b := make([]byte, udpConnectRequestLen)
 	binary.BigEndian.PutUint64(b[0:8], udpProtocolID)
@@ -410,10 +401,9 @@ func connectPacket(tid uint32) []byte {
 	return b
 }
 
-// announcePacket lays AnnounceRequest into the fixed 98-byte announce frame.
-// The IP field is left 0 so the tracker uses the datagram's source address,
-// and num_want is -1 (the protocol's "tracker picks, default 50") unless the
-// caller asked for a specific count.
+// announcePacket lays AnnounceRequest into the fixed 98-byte announce frame. IP
+// stays 0 so the tracker uses the datagram's source address; num_want is -1 —
+// the protocol's "tracker picks, default 50" — unless the caller asked for one.
 func announcePacket(connID uint64, req AnnounceRequest, key uint32) []byte {
 	b := make([]byte, udpAnnounceRequestLen)
 	binary.BigEndian.PutUint64(b[0:8], connID)
@@ -447,11 +437,10 @@ func udpEventCode(ev Event) uint32 {
 	}
 }
 
-// parseUDPAnnounce decodes the announce reply's header and its compact peer
-// list. The 6-byte peer chunks are byte-identical to the HTTP compact form, so
-// the port-0 filter and address handling match that transport. BEP 15 carries
-// no IPv6 peers (there is no peers6 counterpart), so an IPv4-only swarm is the
-// honest limit here.
+// parseUDPAnnounce decodes the announce reply's header and compact peer list.
+// The 6-byte chunks are byte-identical to HTTP's compact form, so the port-0
+// filter matches that transport. BEP 15 has no IPv6 counterpart (no peers6), so
+// an IPv4-only swarm is the honest limit here.
 func parseUDPAnnounce(resp []byte, url string) (AnnounceResponse, error) {
 	if len(resp) < udpAnnounceHeaderLen {
 		return AnnounceResponse{}, &Error{Transient: true, Err: fmt.Errorf(
@@ -481,10 +470,9 @@ func parseUDPAnnounce(resp []byte, url string) (AnnounceResponse, error) {
 }
 
 // errorFrame turns an action=3 datagram's trailing text into a tracker error.
-// The text cannot be classified as permanent or transient reliably ("connection
-// id expired" and "torrent not registered" arrive the same way), so it is
-// reported as transient: the retry re-CONNECTs and the engine's own retry and
-// re-announce schedule decide when to give up.
+// The text can't be classified reliably — "connection id expired" and "torrent
+// not registered" arrive identically — so it stays transient: the retry
+// re-CONNECTs and the engine's re-announce schedule decides when to give up.
 func errorFrame(url string, resp []byte) error {
 	msg := strings.TrimSpace(string(resp[udpErrorHeaderLen:]))
 	if msg == "" {
@@ -494,8 +482,8 @@ func errorFrame(url string, resp []byte) error {
 }
 
 // randomUint32 draws a transaction id (or an announce key) from the system
-// CSPRNG. Transaction ids must be unpredictable: matching replies on them is
-// the only thing standing between us and a forged announce response.
+// CSPRNG. Transaction ids have to be unpredictable: matching replies on them is
+// all that stands between us and a forged announce response.
 func randomUint32() (uint32, error) {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {

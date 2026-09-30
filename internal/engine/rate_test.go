@@ -14,11 +14,9 @@ import (
 // they prove is the enforcement itself: the transfer is paced near the cap, it
 // still finishes, and the request pipeline stays full while it is paced.
 //
-// The bands are deliberately wide (0.5x to 1.5x) because the measured quantity
-// is wall-clock time on a shared machine; the property under test is "paced",
-// not "paced to three decimal places".
+// The bands are wide on purpose (0.5x to 1.5x): the measurement is wall-clock
+// time on a shared box, and the property is "paced", not "paced to three decimals".
 
-// allPieces is the advertise list for a seeder that holds the whole torrent.
 func allPieces(n int) []int {
 	held := make([]int, n)
 	for i := range held {
@@ -27,9 +25,8 @@ func allPieces(n int) []int {
 	return held
 }
 
-// samplePipeline watches a running download and returns, once the returned
-// function is called, the deepest outstanding request window and the busiest
-// peer count seen.
+// samplePipeline polls a running download; call the returned function to stop
+// it and read the deepest outstanding request window and busiest peer count.
 func samplePipeline(eng *Engine) func() (outstanding, active int) {
 	var (
 		mu          sync.Mutex

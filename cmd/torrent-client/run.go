@@ -17,8 +17,8 @@ const (
 	exitUsage = 2
 )
 
-// defaultPort is announced to trackers and listened on for peers when -port is
-// not given. 6881 is the conventional first port in the BitTorrent range.
+// defaultPort is announced and listened on when -port isn't given. 6881 is the
+// conventional first port in the BitTorrent range.
 const defaultPort = 6881
 
 const usageText = `torrent-client — a from-scratch BitTorrent client.
@@ -63,8 +63,8 @@ type usageError struct{ err error }
 func (e usageError) Error() string { return e.err.Error() }
 func (e usageError) Unwrap() error { return e.err }
 
-// run executes one invocation and reports the process exit code. Keeping it
-// separate from main is what makes the CLI contract testable without exec.
+// run executes one invocation and reports the exit code. Keeping it separate
+// from main is what makes the CLI contract testable without exec.
 func run(args []string, stdout, stderr io.Writer) int {
 	cfg, err := parseArgs(args, stdout)
 	switch {
@@ -80,14 +80,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFatal
 	}
 
-	// The grammar is valid, so hand off to the download pipeline, which owns
-	// the fatal-error reporting from here on.
+	// The grammar is valid, so hand off to the download pipeline, which owns fatal
+	// error reporting from here on.
 	return execute(cfg, stdout, stderr)
 }
 
-// parseArgs turns raw arguments into a validated config. A help request is
-// signalled with flag.ErrHelp; anything the caller got wrong comes back as a
-// usageError.
+// parseArgs turns raw arguments into a validated config. A help request comes
+// back as flag.ErrHelp; anything the caller got wrong as a usageError.
 func parseArgs(args []string, usageOut io.Writer) (config, error) {
 	var (
 		cfg     config
@@ -117,8 +116,8 @@ func parseArgs(args []string, usageOut io.Writer) (config, error) {
 		return config{}, usageError{errors.New("expected a torrent file or magnet URI and an output path")}
 	case len(rest) > 2:
 		extra := rest[2]
-		// Go's flag package stops at the first non-flag argument, so a flag
-		// written after the positionals lands here rather than being parsed.
+		// Go's flag package stops at the first non-flag argument, so a flag written
+		// after the positionals lands here instead of being parsed.
 		if strings.HasPrefix(extra, "-") {
 			return config{}, usageError{fmt.Errorf("unexpected extra argument %q: flags must come before the positional arguments", extra)}
 		}
@@ -147,9 +146,8 @@ func parseArgs(args []string, usageOut io.Writer) (config, error) {
 }
 
 // parseRate parses a human-readable size such as "512k" or "2M" into bytes per
-// second; an empty string, or any zero size, means unlimited. This is the
-// grammar the flag accepts today; the surrounding policy (burst, per-direction
-// shaping) is settled by the rate-limiting ticket.
+// second. Empty or zero means unlimited. This is only the flag's grammar; burst
+// and per-direction shaping are policy, settled by the rate-limiting ticket.
 func parseRate(s string) (int64, error) {
 	raw := strings.TrimSpace(s)
 	if raw == "" {

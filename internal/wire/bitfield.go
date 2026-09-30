@@ -11,8 +11,8 @@ func NewBitfield(pieceCount int) []byte {
 	return make([]byte, (pieceCount+7)/8)
 }
 
-// BitfieldHas reports whether the bit for index is set. Out-of-range indices
-// are simply absent rather than a panic.
+// BitfieldHas reports whether the bit for index is set. An out-of-range index
+// is absent rather than a panic.
 func BitfieldHas(bf []byte, index int) bool {
 	if index < 0 || index/8 >= len(bf) {
 		return false
@@ -28,7 +28,7 @@ func BitfieldSet(bf []byte, index int) {
 	bf[index/8] |= 0x80 >> uint(index%8)
 }
 
-// BitfieldCount counts set bits, ignoring padding past pieceCount.
+// BitfieldCount counts set bits, ignoring the padding past pieceCount.
 func BitfieldCount(bf []byte, pieceCount int) int {
 	n := 0
 	for i := 0; i < pieceCount; i++ {

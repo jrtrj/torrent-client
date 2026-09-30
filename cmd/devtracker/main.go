@@ -1,14 +1,9 @@
-// Command devtracker is the in-repo development tracker used by the local
-// swarm harness.
+// Command devtracker is the toy tracker the local swarm harness runs against.
 //
-// It is a test fixture, not a product: it implements only enough of the
-// announce protocol to serve the verification tests, and nothing it does
-// should be treated as tracker-conformance behaviour. In particular it always
-// answers with the compact peer form, and it never rate-limits or expires
-// peers.
-//
-// It serves the same swarm over HTTP and over the BEP 15 UDP protocol, so the
-// harness can exercise either transport against one tracker.
+// A test fixture, not a product: only enough of the announce protocol to pass
+// the verification tests, always the compact peer form, and no rate limits or
+// peer expiry. HTTP and BEP 15 UDP serve the same swarm, so the harness can
+// drive either transport at one tracker.
 package main
 
 import (
@@ -24,9 +19,8 @@ import (
 	"time"
 )
 
-// BEP 15 action ids. The fixture needs only CONNECT and ANNOUNCE; the
-// connection id it issues is a constant, because it does not model the
-// one-minute expiry the real protocol allows.
+// BEP 15 action ids. Only CONNECT and ANNOUNCE matter here, and the connection
+// id is a constant: the fixture doesn't model the protocol's one-minute expiry.
 const (
 	udpActionConnect  = 0
 	udpActionAnnounce = 1
@@ -71,9 +65,9 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/announce", t.announce)
 
-	// The listening addresses are printed so a harness that binds port 0 can
-	// discover which ports the kernel picked. The HTTP line is printed first so
-	// a scan for "listening on" still finds it.
+	// Printed so a harness that binds port 0 can learn the ports the kernel
+	// picked. The HTTP line comes first so a grep for "listening on" still hits
+	// it.
 	fmt.Printf("devtracker: listening on %s\n", ln.Addr())
 	fmt.Printf("devtracker: udp listening on %s\n", conn.LocalAddr())
 	go t.serveUDP(conn)
@@ -93,8 +87,8 @@ type peer struct {
 	downloaded int64
 }
 
-// tracker keeps exactly one swarm per info-hash. Both transports answer from
-// the same map, so an HTTP announce and a UDP announce see each other.
+// tracker keeps one swarm per info-hash. Both transports read the same map, so
+// an HTTP announce and a UDP announce see each other.
 type tracker struct {
 	mu       sync.Mutex
 	interval time.Duration
@@ -146,9 +140,8 @@ func (t *tracker) announce(w http.ResponseWriter, r *http.Request) {
 	complete, incomplete, compact := t.swarmCompactLocked(swarm, peerID)
 	t.mu.Unlock()
 
-	// The uploaded/downloaded counters are logged so the swarm tests can show
-	// a serving client's counters actually moved. The peer id is binary, so it
-	// is printed hex.
+	// Log the counters so swarm tests can show a serving client's counters
+	// moved. Peer ids are binary, hence %x.
 	fmt.Printf("devtracker: announce peer=%x uploaded=%d downloaded=%d left=%d event=%q\n",
 		peerID, uploaded, downloaded, left, event)
 
@@ -170,9 +163,8 @@ func (t *tracker) serveUDP(conn *net.UDPConn) {
 	}
 }
 
-// udpPacket answers one CONNECT or ANNOUNCE datagram. Anything else is
-// ignored: the fixture only speaks the smallest slice of the protocol the
-// client exercises.
+// udpPacket answers one CONNECT or ANNOUNCE datagram. Anything else is ignored:
+// the fixture speaks only the sliver of the protocol the client actually uses.
 func (t *tracker) udpPacket(conn *net.UDPConn, from *net.UDPAddr, req []byte) {
 	if len(req) < 16 {
 		return // too short to carry an action and a transaction id
@@ -209,8 +201,8 @@ func (t *tracker) udpAnnounce(conn *net.UDPConn, from *net.UDPAddr, req []byte, 
 	if event == udpEventStopped {
 		delete(swarm, peerID)
 	} else {
-		// The source address of the datagram is the peer's address, exactly as
-		// RemoteAddr is on the HTTP side.
+		// The datagram's source address is the peer's address, same as RemoteAddr
+		// on the HTTP side.
 		swarm[peerID] = peer{ip: from.IP, port: port, left: left, uploaded: uploaded, downloaded: downloaded}
 	}
 	complete, incomplete, compact := t.swarmCompactLocked(swarm, peerID)
@@ -243,7 +235,6 @@ func udpEventName(code uint32) string {
 	return ""
 }
 
-// swarmLocked returns the swarm for infoHash, creating it if it is new.
 func (t *tracker) swarmLocked(infoHash string) map[string]peer {
 	swarm := t.swarms[infoHash]
 	if swarm == nil {
@@ -254,10 +245,10 @@ func (t *tracker) swarmLocked(infoHash string) map[string]peer {
 }
 
 // swarmCompactLocked tallies the swarm and renders the compact peer blob. The
-// requesting peer is left out: a peer is never handed back to itself.
+// requester is left out — a peer is never handed back to itself.
 //
-// left=0 marks a seeder, anything else a leecher: that distinction is what
-// complete/incomplete report and what lets a leecher find the seed.
+// left=0 is a seeder, anything else a leecher; that's what complete/incomplete
+// report, and how a leecher finds the seed.
 func (t *tracker) swarmCompactLocked(swarm map[string]peer, requesterID string) (complete, incomplete int, compact []byte) {
 	var buf bytes.Buffer
 	for id, p := range swarm {
@@ -277,8 +268,8 @@ func (t *tracker) swarmCompactLocked(swarm map[string]peer, requesterID string) 
 	return complete, incomplete, buf.Bytes()
 }
 
-// response renders the bencoded announce reply by hand. Dictionary keys are
-// emitted in sorted order so strict bencode decoders accept it.
+// response hand-rolls the bencoded announce reply. Keys go out sorted so strict
+// bencode decoders accept it.
 func response(interval time.Duration, complete, incomplete int, compactPeers []byte) []byte {
 	var b bytes.Buffer
 	b.WriteString("d8:completei")

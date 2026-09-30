@@ -145,7 +145,6 @@ func (s *fakeSeeder) peer() tracker.Peer {
 	return tracker.Peer{IP: addr.IP, Port: uint16(addr.Port)}
 }
 
-// servedCount is how many blocks the seeder has answered.
 func (s *fakeSeeder) servedCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

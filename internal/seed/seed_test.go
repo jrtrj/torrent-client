@@ -87,7 +87,6 @@ func (s *testSource) readCount() int {
 	return s.reads
 }
 
-// peer is a scripted inbound peer.
 type peer struct {
 	t    *testing.T
 	conn net.Conn
@@ -170,9 +169,8 @@ func (p *peer) read() (wire.Message, error) {
 	return wire.Decode(p.r)
 }
 
-// expect reads until a message with the given id, skipping haves, which the
-// advertiser may interleave. It fails the test on a different message or an
-// error.
+// expect reads until a message with the given id, skipping the haves the
+// advertiser may interleave. Anything else fails the test.
 func (p *peer) expect(id byte) wire.Message {
 	p.t.Helper()
 	for {
@@ -205,7 +203,6 @@ func (p *peer) expectClosed(why string) {
 
 func (p *peer) close() { p.conn.Close() }
 
-// testPayload returns n random bytes.
 func testPayload(t *testing.T, n int) []byte {
 	t.Helper()
 	buf := make([]byte, n)
@@ -215,8 +212,8 @@ func testPayload(t *testing.T, n int) []byte {
 	return buf
 }
 
-// testTorrent builds a single-file metainfo over data. It goes through the
-// real bencode round trip so the info-hash and piece hashes are genuine.
+// testTorrent builds a single-file metainfo over data by taking the real
+// bencode round trip, so the info-hash and piece hashes are genuine.
 func testTorrent(t *testing.T, data []byte, pieceLength int64) *metainfo.MetaInfo {
 	t.Helper()
 	var pieces []byte
@@ -256,7 +253,6 @@ func mustMarshal(t *testing.T, v any) []byte {
 	return buf.Bytes()
 }
 
-// testStore writes every piece of data into a fresh content file.
 func testStore(t *testing.T, meta *metainfo.MetaInfo, data []byte) *storage.Storage {
 	t.Helper()
 	st, err := storage.Open(filepath.Join(t.TempDir(), "content.bin"), meta.Info.PieceLength, meta.TotalLength())
@@ -283,9 +279,8 @@ func series(n int) []byte {
 	return buf
 }
 
-// TestServesHeldPiecesByteCorrect is the core proof: a peer that handshakes,
-// gets interested, and requests every block receives byte-correct data, and
-// the server's upload counters move.
+// The core proof: a peer handshakes, gets interested, requests every block, and
+// gets byte-correct data back while the server's upload counters move.
 func TestServesHeldPiecesByteCorrect(t *testing.T) {
 	data := testPayload(t, 3*testPieceLength)
 	meta := testTorrent(t, data, testPieceLength)
@@ -334,9 +329,8 @@ func TestServesHeldPiecesByteCorrect(t *testing.T) {
 	}
 }
 
-// TestDropsForeignHandshake proves the swarm gate: a peer whose handshake does
-// not name the torrent is dropped, whether the info-hash or the protocol magic
-// is wrong.
+// The swarm gate: a peer whose handshake does not name the torrent is dropped,
+// whether the info-hash or the protocol magic is wrong.
 func TestDropsForeignHandshake(t *testing.T) {
 	data := series(2 * testPieceLength)
 	meta := testTorrent(t, data, testPieceLength)
@@ -391,10 +385,10 @@ func TestDropsForeignHandshake(t *testing.T) {
 	})
 }
 
-// TestRefusesOutOfBoundsRequests proves every bad request is rejected without a
-// panic and without a disk read: out-of-range pieces and malformed lengths drop
-// the connection; a request for a piece we do not hold yet is ignored while the
-// connection keeps serving.
+// Every bad request is rejected without a panic and without a disk read:
+// out-of-range pieces and malformed lengths drop the connection, while a
+// request for a piece we do not hold yet is ignored and the connection keeps
+// serving.
 func TestRefusesOutOfBoundsRequests(t *testing.T) {
 	data := series(2 * testPieceLength)
 	meta := testTorrent(t, data, testPieceLength)
@@ -452,8 +446,8 @@ func TestRefusesOutOfBoundsRequests(t *testing.T) {
 	})
 }
 
-// TestUploadSlotsBoundConcurrentPeers proves the choke policy: no more than
-// uploadSlots interested peers are unchoked at once.
+// The choke policy: no more than uploadSlots interested peers are unchoked at
+// once.
 func TestUploadSlotsBoundConcurrentPeers(t *testing.T) {
 	data := series(testPieceLength)
 	meta := testTorrent(t, data, testPieceLength)
@@ -494,9 +488,8 @@ func TestUploadSlotsBoundConcurrentPeers(t *testing.T) {
 	}
 }
 
-// TestAdvertisesPiecesVerifiedLater proves a peer that connects before a piece
-// exists is told about it once it verifies, and can then fetch it. This is what
-// makes serving during the download useful.
+// A peer that connects before a piece exists is told about it once it verifies,
+// and can then fetch it. This is what makes serving during the download useful.
 func TestAdvertisesPiecesVerifiedLater(t *testing.T) {
 	data := series(2 * testPieceLength)
 	meta := testTorrent(t, data, testPieceLength)
@@ -518,8 +511,8 @@ func TestAdvertisesPiecesVerifiedLater(t *testing.T) {
 
 	seen := make(map[int]bool)
 	// Generous: the advertiser ticks at a fixed rate and a loaded box can delay
-	// it. The property is that the have arrives at all, not that it arrives
-	// inside a scheduler-dependent window.
+	// it. What matters is that the have arrives at all, not that it lands inside
+	// a scheduler-dependent window - asserting on those is a pain in the ass.
 	deadline := time.Now().Add(30 * time.Second)
 	for len(seen) < 2 && time.Now().Before(deadline) {
 		m, err := p.read()
@@ -544,8 +537,8 @@ func TestAdvertisesPiecesVerifiedLater(t *testing.T) {
 	}
 }
 
-// TestShutdownClosesConnections proves Serve/Close leave nothing running: after
-// Close, an open peer connection is dropped and the accept loop has stopped.
+// Serve and Close leave nothing running: after Close, an open peer connection
+// is dropped and the accept loop has stopped.
 func TestShutdownClosesConnections(t *testing.T) {
 	data := series(testPieceLength)
 	meta := testTorrent(t, data, testPieceLength)

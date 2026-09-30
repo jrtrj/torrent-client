@@ -12,7 +12,7 @@ import (
 )
 
 // newLimitedServer starts a server with an upload limiter (nil for none), so a
-// test can compare the two paths over the same scripted peer.
+// test can run the same scripted peer against both paths.
 func newLimitedServer(t *testing.T, meta *metainfo.MetaInfo, src Source, limiter *ratelimit.Limiter) *Server {
 	t.Helper()
 	srv, err := New(Config{
@@ -117,8 +117,8 @@ func TestUploadWithoutALimiterIsNotPaced(t *testing.T) {
 }
 
 // A peer that stops reading must not pin a serving goroutine inside the
-// limiter: stopping the server has to release a wait that is half a minute from
-// being satisfied, on both the context and the Close path.
+// limiter: stopping the server has to release a wait that is half a minute away
+// from being satisfied, on both the context and the Close path.
 func TestStoppingAServerReleasesAThrottledPeer(t *testing.T) {
 	const rate = int64(1024)
 	data := series(2 * testPieceLength)

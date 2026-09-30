@@ -1,11 +1,10 @@
 // Package metadata fetches a torrent's info dictionary from the swarm with
 // ut_metadata (BEP 9), which is what makes a magnet link usable: the link
-// carries only an info-hash, and the metadata is reassembled from peers and
-// then checked against that hash.
+// carries only an info-hash, and the dictionary is reassembled from peers.
 //
-// The hash is the trust anchor. A peer is free to send any bytes it likes, so
-// nothing is used until the reassembled dictionary hashes to the info-hash the
-// magnet asked for.
+// The hash is the trust anchor. A peer can send whatever bytes it likes, so
+// nothing is used until the reassembled dictionary hashes to the info-hash we
+// asked for.
 package metadata
 
 import (
@@ -27,19 +26,17 @@ const (
 	// extension handshake itself by BEP 10.
 	extensionHandshakeID = 0
 
-	// ourUTMetadataID is the id we advertise for ut_metadata. When sending we
-	// use the id the PEER advertised, and on receive we accept any non-zero id
-	// (see handleExtension), so a peer that numbers extensions differently
-	// still interoperates.
+	// ourUTMetadataID is the id we advertise for ut_metadata. Outbound we use the
+	// id the PEER advertised; inbound we accept any non-zero id, so a peer that
+	// numbers extensions differently still interoperates.
 	ourUTMetadataID = 1
 
 	// metadataPieceSize is fixed by BEP 9: metadata is transferred in 16 KiB
 	// pieces regardless of the torrent's own piece length.
 	metadataPieceSize = 16 * 1024
 
-	// maxMetadataSize bounds what we will believe. A real info dictionary is
-	// kilobytes; anything approaching this is a peer trying to make us
-	// allocate a huge buffer.
+	// maxMetadataSize caps what we will believe: a real info dictionary is
+	// kilobytes, so this is just a peer trying to make us allocate a huge buffer.
 	maxMetadataSize = 4 << 20
 
 	// maxPeersAsked bounds how many peers we interrogate at once.
@@ -267,7 +264,6 @@ func readExtended(conn net.Conn, infoHash [20]byte) (byte, []byte, error) {
 		case wire.IDExtended:
 			return m.Extended[0], m.Extended[1:], nil
 		default:
-			// Anything else is not ours to act on here.
 			continue
 		}
 	}
@@ -275,8 +271,8 @@ func readExtended(conn net.Conn, infoHash [20]byte) (byte, []byte, error) {
 
 // splitBencodePrefix returns the first complete bencoded value in b and the
 // bytes after it. A ut_metadata data message is a bencoded dictionary with the
-// raw metadata appended, so the split has to be exact — decoding the whole
-// body as bencode would fail on the trailing bytes.
+// raw metadata tacked on, so the split has to be exact — bencode-decoding the
+// whole body would choke on those trailing bytes.
 func splitBencodePrefix(b []byte) ([]byte, []byte, error) {
 	if len(b) == 0 || b[0] != 'd' {
 		return nil, nil, errors.New("extended body does not start with a dictionary")

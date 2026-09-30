@@ -6,16 +6,16 @@ import (
 	"torrent-client/internal/wire"
 )
 
-// blockRange is one request-sized slice of a piece. It is the unit the wire
-// protocol and the per-connection request ledger both work in.
+// blockRange is one request-sized slice of a piece: the unit the wire protocol
+// and the per-connection request ledger both work in.
 type blockRange struct {
 	begin  uint32
 	length uint32
 }
 
-// blockRanges splits a piece into requests of at most wire.BlockSize. The
-// final block is short when the piece does not divide evenly, which is also
-// how the short last piece of a torrent is handled.
+// blockRanges splits a piece into requests of at most wire.BlockSize. The last
+// block is short when the size doesn't divide evenly — the same handling the
+// short final piece of a torrent gets.
 func blockRanges(size int64) []blockRange {
 	if size <= 0 {
 		return nil
@@ -31,16 +31,15 @@ func blockRanges(size int64) []blockRange {
 	return ranges
 }
 
-// block is one block's assembly state inside a piece.
+// One block's assembly state inside a piece.
 type block struct {
 	begin    uint32
 	length   uint32
 	received bool
-	// inflight names the peer that owes us this block, or nil when nobody
-	// does. Only the piece's owner may be named here, which is what stops two
-	// workers fetching the same block.
+	// The peer that owes us this block, or nil. Only the piece's owner may be
+	// named here, which is what stops two workers fetching the same block.
 	inflight *peerState
-	// deadline is when an unanswered request for this block expires.
+	// When an unanswered request for this block expires.
 	deadline time.Time
 }
 
@@ -50,9 +49,9 @@ type pieceState struct {
 	index  int
 	size   int64
 	blocks []block
-	// buf holds the blocks received so far. It is kept across a handover so a
-	// choke does not throw away verified-so-far work, and dropped on a failed
-	// hash so a corrupt block can never survive a retry.
+	// Blocks received so far. Kept across a handover so a choke doesn't throw
+	// away verified-so-far work, dropped on a failed hash so a corrupt block
+	// can't survive a retry.
 	buf          []byte
 	received     int
 	owner        *peerState
@@ -68,9 +67,9 @@ func newPiece(index int, size int64) *pieceState {
 	return ps
 }
 
-// blockAt maps a requested begin offset to a block index, or -1 when the
-// offset is not one we asked for. Blocks are laid out every BlockSize bytes,
-// so the mapping is arithmetic with a check against a hostile peer's offset.
+// blockAt maps a requested begin offset to a block index, or -1 if it's not one
+// we asked for. Blocks sit every BlockSize bytes, so the mapping is arithmetic
+// with a check against a hostile peer's offset.
 func (ps *pieceState) blockAt(begin uint32) int {
 	i := int(begin / wire.BlockSize)
 	if i < 0 || i >= len(ps.blocks) || ps.blocks[i].begin != begin {
@@ -79,8 +78,8 @@ func (ps *pieceState) blockAt(begin uint32) int {
 	return i
 }
 
-// nextMissing returns the index of the first block that is neither received
-// nor already requested, or -1 when the piece has nothing more to ask for.
+// nextMissing returns the first block that's neither received nor already
+// requested, or -1 when there's nothing more to ask for.
 func (ps *pieceState) nextMissing() int {
 	for i := range ps.blocks {
 		if !ps.blocks[i].received && ps.blocks[i].inflight == nil {
@@ -101,9 +100,8 @@ func (ps *pieceState) clearInflight(i int) {
 	}
 }
 
-// reset throws the piece back to "nothing fetched". It is the recovery path
-// for a failed hash: keeping any of the bytes could keep a corrupt block
-// alive across retries, so none of them survive.
+// reset throws the piece back to "nothing fetched", the recovery path for a
+// failed hash: keeping any bytes could keep a corrupt block alive across retries.
 func (ps *pieceState) reset() {
 	for i := range ps.blocks {
 		ps.blocks[i].received = false

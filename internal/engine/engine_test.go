@@ -6,8 +6,7 @@ import (
 	"torrent-client/internal/wire"
 )
 
-// The block splitter is the piece-boundary math: every block is at most 16 KiB
-// and only the final one of a piece is short.
+// Blocks are capped at 16 KiB; only a piece's final block may be short.
 func TestBlockRanges(t *testing.T) {
 	tests := []struct {
 		name string

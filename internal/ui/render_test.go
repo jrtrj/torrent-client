@@ -41,7 +41,7 @@ func TestBarRendersBothCapsAndTheRequestedCells(t *testing.T) {
 }
 
 // A zero or negative cell count would otherwise render a bar with no track at
-// all, which reads as "no progress" next to a percentage that says otherwise.
+// all, which reads as "no progress" next to a percentage saying otherwise.
 func TestBarKeepsAMinimumTrack(t *testing.T) {
 	for _, cells := range []int{-1, 0} {
 		if got := Bar(0.5, cells); utf8.RuneCountInString(got) != minBarCells+2 {
@@ -117,8 +117,8 @@ func TestETA(t *testing.T) {
 	}
 }
 
-// The bar is built from multi-byte glyphs, so a byte-wise cut would put half a
-// character on screen. Every prefix must stay valid UTF-8.
+// The bar is multi-byte glyphs, so a byte-wise cut would put half a character on
+// screen. Every prefix has to stay valid UTF-8.
 func TestTruncateNeverSplitsARune(t *testing.T) {
 	line := barCapLeft + strings.Repeat(barFull, 3) + barCapRight
 
@@ -153,9 +153,9 @@ func renderStats() engine.Stats {
 	}
 }
 
-// The single hardest requirement: whatever the width, the frame must fit and
-// must carry no escape sequences. Writing into the final column is what puts
-// terminals into pending-wrap, so the frame has to stay inside the budget.
+// The single hardest requirement: whatever the width, the frame has to fit and
+// carry no escape sequences. Writing into the final column is what puts
+// terminals into pending-wrap, so the frame stays inside the budget.
 func TestRenderFitsEveryWidthWithoutEscapes(t *testing.T) {
 	st := renderStats()
 	for width := 1; width <= 200; width++ {
@@ -176,7 +176,7 @@ func TestRenderFitsEveryWidthWithoutEscapes(t *testing.T) {
 	}
 }
 
-// Narrowing the terminal must drop the least useful fields first and never
+// Narrowing the terminal has to drop the least useful fields first and never
 // lose the bar and percentage entirely.
 func TestRenderDropsFieldsAsTheTerminalNarrows(t *testing.T) {
 	st := renderStats()
@@ -242,8 +242,8 @@ func TestLimitBadgeNamesOnlyTheCappedDirections(t *testing.T) {
 	}
 }
 
-// The display has to say that limiting is on, and a capped frame still has to
-// obey the width budget at every width.
+// The display has to say limiting is on, and a capped frame still has to obey
+// the width budget at every width.
 func TestRenderShowsActiveCaps(t *testing.T) {
 	st := renderStats()
 	st.MaxDownRate = 512 * 1024
@@ -253,8 +253,8 @@ func TestRenderShowsActiveCaps(t *testing.T) {
 	if !strings.Contains(wide, "cap") || !strings.Contains(wide, "512.0 kB/s") || !strings.Contains(wide, "2.0 MB/s") {
 		t.Fatalf("capped frame %q does not name the caps", wide)
 	}
-	// The limits are the last field, so they drop first on a narrow terminal
-	// but must never crowd an unlimited frame; an unlimited one shows nothing.
+	// The limits are the last field, so they drop first on a narrow terminal,
+	// but an unlimited frame never shows them at all.
 	if got := Render(renderStats(), 0, 120); strings.Contains(got, "cap") {
 		t.Fatalf("unlimited frame %q claims a cap", got)
 	}

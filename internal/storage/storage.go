@@ -9,22 +9,22 @@ import (
 	"sync"
 )
 
-// maxOpenFiles bounds the lazily opened file-handle cache. A multi-file
-// torrent can declare thousands of files and a client that opened them all
-// would run the process out of descriptors; pieces are written in roughly
-// stream order, so a small cache still hits most of the time.
+// maxOpenFiles caps the lazily opened handle cache. A torrent can declare
+// thousands of files and opening all of them would run us out of
+// descriptors; pieces arrive in stream order, so a small cache still hits
+// most of the time.
 const maxOpenFiles = 16
 
-// FileSpec is one file of a multi-file torrent: its path segments, relative to
-// the torrent's root directory, and its length. The type is deliberately local
-// to storage rather than taken from metainfo so the store stays a leaf package.
+// FileSpec is one file of a multi-file torrent: path segments relative to the
+// torrent's root, and its length. Deliberately a local mirror of metainfo
+// instead of an import of it, so storage stays a leaf package.
 type FileSpec struct {
 	Path   []string
 	Length int64
 }
 
-// span is one file's slice of the contiguous piece stream: the file on disk,
-// where its first byte sits in the stream, and how long it is.
+// span is one file's slice of the contiguous stream: where it sits on disk,
+// where its first byte lands in the stream, and how long it is.
 type span struct {
 	path   string
 	start  int64
@@ -34,11 +34,10 @@ type span struct {
 // Storage is the content store.
 //
 // Every torrent is modelled as ONE CONTIGUOUS BYTE STREAM laid over a list of
-// files, and a single-file torrent is simply the degenerate case of one span
-// covering the whole stream. Unifying the two shapes here is what lets the
-// download, resume and seed paths avoid caring which kind of torrent they are
-// serving: a piece that straddles a file boundary is just a stream range that
-// happens to cross two spans.
+// files, and a single-file torrent is just the degenerate case: one span over
+// the whole thing. Unifying the two here is what lets the download, resume and
+// seed paths stop caring which shape they're serving — a piece straddling a
+// file boundary is only a stream range that crosses two spans.
 type Storage struct {
 	pieceLength int64
 	totalLength int64
@@ -50,16 +49,16 @@ type Storage struct {
 }
 
 // Open opens a single-file torrent's content at path, sized to totalLength.
-// A missing parent directory is created.
+// Missing parent directories get created.
 func Open(path string, pieceLength, totalLength int64) (*Storage, error) {
 	clean := filepath.Clean(path)
 	return build([]span{{path: clean, start: 0, length: totalLength}}, pieceLength, totalLength)
 }
 
-// OpenMulti opens a multi-file torrent's content under dir. Each file's path
-// segments are validated before anything touches the filesystem, so a torrent
-// declaring a traversal (or an absolute or Windows-style path) is refused
-// rather than allowed to write outside dir.
+// OpenMulti opens a multi-file torrent's content under dir. Every path segment
+// is validated before anything touches the filesystem, so a torrent naming a
+// traversal, an absolute path or a Windows-style path gets refused instead of
+// writing outside dir.
 func OpenMulti(dir string, files []FileSpec, pieceLength, totalLength int64) (*Storage, error) {
 	root := filepath.Clean(dir)
 	if len(files) == 0 {
@@ -89,8 +88,8 @@ func OpenMulti(dir string, files []FileSpec, pieceLength, totalLength int64) (*S
 }
 
 // validateSegments rejects anything that could escape the output directory.
-// The torrent format lets a file be named anything, including `..`, so this is
-// the boundary where a hostile .torrent stops being a path.
+// A torrent can name a file anything, `..` included, so this is the boundary
+// where a hostile .torrent stops being a path.
 func validateSegments(segs []string) error {
 	if len(segs) == 0 {
 		return fmt.Errorf("empty path")
@@ -114,20 +113,20 @@ func validateSegment(s string) error {
 	case strings.ContainsAny(s, `/\`):
 		return fmt.Errorf("contains a path separator")
 	case strings.ContainsRune(s, ':'):
-		// A drive letter ("C:evil") or an alternate data stream on Windows.
-		// Plain colons are legal on unix but no legitimate torrent needs one,
-		// and refusing them is cheaper than reasoning about every platform.
+		// A drive letter ("C:evil") or an NTFS alternate data stream. Colons
+		// are legal on unix and no legitimate torrent needs one, so refusing
+		// them everywhere beats reasoning about per-platform rules.
 		return fmt.Errorf("contains a colon")
 	}
 	return nil
 }
 
-// ValidateName checks the torrent's own name, which for a multi-file torrent
-// becomes the root directory and so must be a single safe path segment.
+// ValidateName checks the torrent's own name. For a multi-file torrent that
+// name becomes the root directory, so it has to be one safe path segment.
 func ValidateName(name string) error { return validateSegment(name) }
 
-// build creates every file up front so the store presents the full length of
-// the content immediately, then hands out handles lazily.
+// build creates every file up front so the store reports the full content
+// length immediately; handles come later, on demand.
 func build(spans []span, pieceLength, totalLength int64) (*Storage, error) {
 	if pieceLength <= 0 {
 		return nil, fmt.Errorf("storage: piece length %d is not positive", pieceLength)
@@ -145,8 +144,8 @@ func build(spans []span, pieceLength, totalLength int64) (*Storage, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Truncating guarantees the file is exactly the declared length even
-		// when an earlier attempt left a longer or shorter one behind.
+		// Truncate so the length is exactly as declared, even if an earlier
+		// attempt left a longer or shorter file behind.
 		if err := f.Truncate(sp.length); err != nil {
 			f.Close()
 			return nil, err
@@ -163,15 +162,15 @@ func build(spans []span, pieceLength, totalLength int64) (*Storage, error) {
 	}, nil
 }
 
-// Length is the content length in bytes.
+// Length is the content's total size in bytes.
 func (s *Storage) Length() int64 { return s.totalLength }
 
-// Files is the number of files holding the content: one for a single-file
-// torrent, the number of entries for a multi-file one.
+// Files is how many files hold the content: one for a single-file torrent,
+// the file count for a multi-file one.
 func (s *Storage) Files() int { return len(s.spans) }
 
-// WritePiece stores one verified piece at its position in the piece stream,
-// splitting the write across file boundaries when the piece straddles them.
+// WritePiece stores one verified piece at its slot in the piece stream,
+// splitting the write when the piece straddles a file boundary.
 func (s *Storage) WritePiece(index int, data []byte) error {
 	if index < 0 || int64(len(data)) > s.pieceLength {
 		return fmt.Errorf("storage: piece %d is %d bytes, which does not fit a %d-byte piece",
@@ -188,8 +187,8 @@ func (s *Storage) WritePiece(index int, data []byte) error {
 	return s.writeStreamLocked(off, data)
 }
 
-// ReadBlock returns length bytes at begin within piece index, gathering them
-// across file boundaries when the block straddles them.
+// ReadBlock returns length bytes starting at begin inside piece index,
+// stitching them together when the block straddles a file boundary.
 func (s *Storage) ReadBlock(index int, begin, length uint32) ([]byte, error) {
 	off := int64(index)*s.pieceLength + int64(begin)
 	if index < 0 || off+int64(length) > s.totalLength {
@@ -252,8 +251,8 @@ func (s *Storage) readStreamLocked(off int64, length int) ([]byte, error) {
 	return buf, nil
 }
 
-// spanAt finds the file holding stream offset off. Zero-length files occupy no
-// bytes, so they can never be selected.
+// spanAt finds the file holding stream offset off. Zero-length files take up
+// no bytes, so the search can never land on one.
 func (s *Storage) spanAt(off int64) (int, error) {
 	i := sort.Search(len(s.spans), func(i int) bool {
 		return s.spans[i].start+s.spans[i].length > off
@@ -264,8 +263,8 @@ func (s *Storage) spanAt(off int64) (int, error) {
 	return i, nil
 }
 
-// fileAt returns an open handle for span i, opening it on demand and evicting
-// the oldest handle once the cache is full.
+// fileAt returns an open handle for span i, opening on demand and evicting the
+// oldest entry once the cache is full.
 func (s *Storage) fileAt(i int) (*os.File, error) {
 	if f, ok := s.open[i]; ok {
 		return f, nil
@@ -288,8 +287,8 @@ func (s *Storage) fileAt(i int) (*os.File, error) {
 }
 
 // Sync flushes every open file to stable storage. The engine calls it on
-// shutdown so the resume sidecar, which is written after it, can never record
-// a piece whose bytes have not at least reached the kernel.
+// shutdown, before writing the resume sidecar, so the sidecar can never
+// record a piece whose bytes haven't at least reached the kernel.
 func (s *Storage) Sync() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -302,7 +301,7 @@ func (s *Storage) Sync() error {
 	return firstErr
 }
 
-// Close releases every open handle. It is safe to call more than once.
+// Close releases every open handle. Safe to call more than once.
 func (s *Storage) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

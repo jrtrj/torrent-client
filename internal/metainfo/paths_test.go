@@ -21,9 +21,9 @@ func multiFileInfoDict(name string, path []string, length int64) any {
 	}
 }
 
-// A .torrent can name a file anything the bencode allows, including a
-// traversal, an absolute path or a Windows drive. The parser is the first line
-// of defence: it refuses one rather than passing it to the filesystem.
+// A .torrent can name a file anything bencode allows — a traversal, an absolute
+// path, a Windows drive. The parser is the first line of defence: it refuses
+// one here rather than passing it to the filesystem.
 func TestParseRefusesTraversingFilePaths(t *testing.T) {
 	bad := [][]string{
 		{"..", "evil"},
@@ -71,8 +71,8 @@ func TestParseRefusesATraversingName(t *testing.T) {
 	}
 }
 
-// The defence must not reject ordinary names and nested paths, or real
-// torrents would stop working.
+// The defence must not reject ordinary names and nested paths, or half the real
+// torrents out there stop working.
 func TestParseAcceptsOrdinaryNamesAndNestedPaths(t *testing.T) {
 	names := []string{"bundle", "my.torrent.iso", "a-b_c", "Ubuntu 24.04"}
 	for _, name := range names {

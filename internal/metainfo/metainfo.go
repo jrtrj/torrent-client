@@ -2,10 +2,9 @@
 // and seed paths need.
 //
 // The info-hash is SHA-1 over the raw `info` dictionary bytes exactly as they
-// appear in the file. Re-encoding the parsed values instead can reorder keys
-// and silently produce a hash that no tracker or peer will recognise, so the
-// raw bytes are captured at decode time with bencode.RawMessage and never
-// rebuilt.
+// sit in the file. Re-encoding the parsed values can reorder keys and produce
+// a hash no tracker or peer recognises, so those bytes are captured at decode
+// time with bencode.RawMessage and never rebuilt.
 package metainfo
 
 import (
@@ -45,18 +44,16 @@ type MetaInfo struct {
 	AnnounceList [][]string
 	Info         Info
 	InfoHash     [HashSize]byte
-	// RawInfo is the info dictionary exactly as it arrived. It is kept because
-	// peers verify metadata against the info-hash, which is the hash of these
-	// exact bytes: re-encoding the parsed fields could reorder keys and produce
-	// a different hash, and we would then be serving metadata nobody can trust.
+	// RawInfo is the info dictionary exactly as it arrived. The info-hash is the
+	// hash of these exact bytes, so re-encoding the parsed fields could reorder
+	// keys and leave us serving metadata nobody can trust.
 	RawInfo []byte
 }
 
 // Multifile reports whether the torrent describes a set of files.
 func (m *MetaInfo) Multifile() bool { return len(m.Info.Files) > 0 }
 
-// TotalLength is the length of the contiguous piece stream, i.e. the summed
-// length of every file.
+// TotalLength is the summed length of every file — the contiguous piece stream.
 func (m *MetaInfo) TotalLength() int64 {
 	if !m.Multifile() {
 		return m.Info.Length
@@ -68,8 +65,8 @@ func (m *MetaInfo) TotalLength() int64 {
 	return total
 }
 
-// PieceCount is derived from the hash string, not from the length: a truncated
-// or padded `pieces` value is the corruption worth catching early.
+// PieceCount is derived from the hash string, not the length: a truncated or
+// padded `pieces` value is the corruption worth catching early.
 func (m *MetaInfo) PieceCount() int {
 	if m.Info.PieceLength <= 0 {
 		return 0
@@ -77,8 +74,8 @@ func (m *MetaInfo) PieceCount() int {
 	return len(m.Info.PieceHashes) / HashSize
 }
 
-// PieceSize returns the byte length of piece i. Only the last piece may be
-// shorter than the piece length.
+// PieceSize is the byte length of piece i. Only the last piece can be shorter
+// than the piece length.
 func (m *MetaInfo) PieceSize(i int) int64 {
 	if i < 0 || i >= m.PieceCount() {
 		return 0
@@ -151,10 +148,9 @@ func Parse(r io.Reader) (*MetaInfo, error) {
 }
 
 // ParseInfoBytes builds a MetaInfo from an info dictionary fetched from the
-// swarm. A magnet link supplies the trackers, because the info dictionary of a
-// magnet-only torrent usually carries none of its own. The caller must have
-// already checked that these exact bytes hash to the info-hash the magnet
-// asked for — that hash is the only reason to trust them.
+// swarm, with the magnet's trackers standing in for the ones it usually lacks.
+// The caller must already have checked that these exact bytes hash to the
+// info-hash the magnet asked for — that hash is the only reason to trust them.
 func ParseInfoBytes(infoBytes []byte, trackers []string) (*MetaInfo, error) {
 	if len(infoBytes) == 0 {
 		return nil, errors.New("metainfo: empty info dictionary")
@@ -170,15 +166,14 @@ func ParseInfoBytes(infoBytes []byte, trackers []string) (*MetaInfo, error) {
 	return parseInfo(infoBytes, announce, announceList)
 }
 
-// parseInfo builds a MetaInfo from the raw info dictionary plus whatever
-// tracker information arrived alongside it.
+// parseInfo builds a MetaInfo from a raw info dictionary and its tracker data.
 func parseInfo(rawInfo []byte, announce string, announceList [][]string) (*MetaInfo, error) {
 	if len(rawInfo) == 0 {
 		return nil, errors.New("metainfo: missing info dictionary")
 	}
 
-	// `pieces` is binary, and the codec does not assign bencode strings into
-	// []byte fields, so it is read as a string and converted.
+	// `pieces` is binary and the codec will not assign a bencode string into a
+	// []byte field, so read it as a string and convert.
 	var info struct {
 		Name        string `bencode:"name"`
 		PieceLength int64  `bencode:"piece length"`
@@ -212,12 +207,11 @@ func parseInfo(rawInfo []byte, announce string, announceList [][]string) (*MetaI
 	return m, nil
 }
 
-// validPathSegments rejects a path that could escape the output directory. The
+// validPathSegments refuses a path that could escape the output directory. The
 // torrent format puts no restriction on these strings, so a hostile .torrent
-// can legitimately declare "..", an absolute path or a Windows drive; the
-// parser refuses one here rather than letting it reach the filesystem. This is
-// belt to storage's braces: both layers check, so a caller that bypasses one
-// is still covered by the other.
+// can declare "..", an absolute path or a Windows drive; refusing it here
+// stops it reaching the filesystem. Belt to storage's braces: both layers
+// check, so a caller that bypasses one is still covered by the other.
 func validPathSegments(segs []string) error {
 	for _, s := range segs {
 		switch {
@@ -241,7 +235,7 @@ func (m *MetaInfo) validate() error {
 		return errors.New("metainfo: info dictionary has no name")
 	}
 	// The name becomes a file (single-file) or a directory (multi-file) under
-	// the output path, so it must be one safe path segment.
+	// the output path, so it has to be one safe segment.
 	if err := validPathSegments([]string{m.Info.Name}); err != nil {
 		return fmt.Errorf("metainfo: name %q: %w", m.Info.Name, err)
 	}

@@ -18,108 +18,98 @@ import (
 )
 
 const (
-	// defaultPipelineDepth is how many 16 KiB block requests may be in flight
-	// on one connection. BEP 3 leaves the number to the client; a window of 8
-	// keeps a peer busy across a WAN round trip without letting one slow peer
-	// hold a large share of the request window.
+	// How many 16 KiB block requests may be in flight on one connection. BEP 3
+	// leaves the number to the client; a window of 8 keeps a peer busy across a
+	// WAN round trip without letting one slow peer hog the request window.
 	defaultPipelineDepth = 8
-	// maxPipelineDepth caps a caller-supplied depth so the in-flight window
-	// stays bounded whatever the caller asks for.
+	// Ceiling on a caller-supplied depth, whatever they ask for.
 	maxPipelineDepth = 16
 
 	dialTimeout      = 10 * time.Second
 	handshakeTimeout = 10 * time.Second
-	// idleTimeout bounds the wait for any message from a peer. It doubles as
-	// the per-write deadline, so one wedged peer cannot pin a pump forever.
+	// Bounds the wait for any message from a peer, and doubles as the per-write
+	// deadline, so one wedged peer can't pin a pump forever.
 	idleTimeout = 30 * time.Second
-	// defaultStallTimeout is the wall-clock grace a block request gets before
-	// it is re-issued to another peer.
+	// Grace a block request gets before it's re-issued to another peer.
 	defaultStallTimeout = 20 * time.Second
-	// noProgressTimeout fails a download that cannot move forward, so a swarm
-	// with no useful peers surfaces as an error instead of hanging.
+	// Fails a download that can't move forward, so a swarm with no useful peers
+	// surfaces as an error instead of hanging.
 	noProgressTimeout = 2 * time.Minute
-	// swarmRetryDelay is the shortest gap between announces while no peer is
-	// connected, so a peer that appears later is picked up quickly.
+	// Shortest gap between announces while no peer is connected, so one that
+	// shows up later gets picked up fast.
 	swarmRetryDelay = time.Second
-	// defaultAnnounceInterval is used when a tracker does not say how often to
-	// re-announce.
+	// Used when a tracker doesn't say how often to re-announce.
 	defaultAnnounceInterval = 30 * time.Second
 	minAnnounceInterval     = time.Second
 	maxAnnounceInterval     = 10 * time.Minute
 
-	// maxDialers bounds simultaneous outbound dials.
 	maxDialers = 8
-	// eventBuffer and dialBuffer size the scheduler's inbound queues. They are
-	// large enough that connection pumps never block on a busy scheduler.
+	// Sizes the scheduler's inbound queues: big enough that connection pumps
+	// never block on a busy scheduler.
 	eventBuffer = 512
 	dialBuffer  = 256
 )
 
-// Config is everything one download needs. The tracker is injected so the
-// engine never constructs transports itself.
+// Config is everything one download needs. The tracker is injected, so the
+// engine never builds its own transports.
 type Config struct {
 	Meta   *metainfo.MetaInfo
 	PeerID [20]byte
 	Port   uint16
-	// Output is where the single-file content is written. It is ignored when
-	// Store is supplied.
+	// Output is where the single-file content goes; ignored when Store is set.
 	Output  string
 	Tracker tracker.Tracker
 
-	// MaxDownRate caps the download at this many bytes per second; zero means
-	// unlimited. Control frames are not counted against it — only content
-	// bytes are, which is what the cap is about.
+	// MaxDownRate caps the download in bytes per second; zero is unlimited. Only
+	// content bytes count against it — control frames don't, which is the point.
 	MaxDownRate int64
 
 	// Store optionally supplies the content store. When nil the engine opens
-	// Output itself and closes it when Run returns. A caller-supplied store is
-	// left open: the caller owns it, which is what lets the upload path read
-	// the same file the download path writes.
+	// Output itself and closes it when Run returns. A store the caller supplied
+	// is theirs and stays open, so uploads can read the file we write.
 	Store *storage.Storage
 
-	// Uploaded, when set, is the session's uploaded byte count reported to the
-	// tracker. The engine does not serve peers itself, so the number comes
-	// from the upload path.
+	// Uploaded, when set, is the session upload count reported to the tracker.
+	// The engine doesn't serve peers itself, so the number comes from the
+	// upload path.
 	Uploaded func() int64
 
 	// Seed keeps the engine in the swarm after the content is complete: Run
-	// does not return on completion but keeps re-announcing on the tracker's
+	// doesn't return on completion, it keeps re-announcing on the tracker's
 	// interval until the context is cancelled, then announces stopped. The
 	// upload listener is the caller's to run and outlives Run's return.
 	Seed bool
 
 	// Resume, when non-nil, makes the download resumable: the engine restores
-	// the verified pieces it records (re-checking each against the store) and
-	// persists every newly verified piece back to it. A nil Resume disables
-	// resumption, so the download always starts from nothing. The store is
-	// keyed to the torrent info-hash and the output path; see internal/state.
+	// the recorded verified pieces (re-checking each against the store) and
+	// persists newly verified ones back. Nil starts from nothing every time.
+	// The store is keyed to info-hash plus output path; see internal/state.
 	Resume *state.Store
 
-	// Log receives one line per milestone. A nil Log discards them. Calls are
-	// serialised, so a Log that is not goroutine-safe is still usable.
+	// Log gets one line per milestone; nil discards them. Calls are serialised,
+	// so a Log that isn't goroutine-safe still works.
 	Log func(format string, args ...any)
 
 	// PipelineDepth is the per-connection in-flight block window. Zero means
-	// defaultPipelineDepth; values above maxPipelineDepth are clamped.
+	// defaultPipelineDepth, anything above maxPipelineDepth is clamped.
 	PipelineDepth int
-	// StallTimeout is how long one block request may go unanswered before it
-	// is re-issued to another peer. Zero means defaultStallTimeout.
+	// StallTimeout is how long a block request may go unanswered before it's
+	// re-issued to another peer. Zero means defaultStallTimeout.
 	StallTimeout time.Duration
 }
 
 // Engine downloads a torrent's content from a swarm. One scheduler goroutine
-// owns every piece of scheduling state; each connection runs its own read and
-// write pumps and talks to the scheduler over channels. That keeps the
-// pending-piece state single-sourced, which is what rules out two workers on
-// the same piece and the "re-enqueue forever" spin.
+// owns all the scheduling state; each connection runs its own read and write
+// pumps and talks to it over channels. Single-sourcing the pending-piece
+// state rules out two workers on one piece and the "re-enqueue forever" spin.
 type Engine struct {
 	cfg    Config
 	meta   *metainfo.MetaInfo
 	store  *storage.Storage
 	resume *state.Store
 
-	// limiter is the download direction's token bucket. The upload path has
-	// its own, owned by whoever runs the inbound listener.
+	// limiter is the download direction's token bucket. The upload path has its
+	// own, owned by whoever runs the inbound listener.
 	limiter *ratelimit.Limiter
 
 	pipelineDepth int
@@ -134,8 +124,8 @@ type Engine struct {
 	have       []byte
 	haveCount  int
 	bytesDone  int64
-	// stateDirty is set when a piece verifies and cleared when the sidecar is
-	// written, so persistence tracks verified pieces rather than every event.
+	// Set when a piece verifies, cleared when the sidecar is written, so
+	// persistence tracks verified pieces rather than every event.
 	stateDirty bool
 	peers      map[string]*peerState
 	blacklist  map[string]bool
@@ -150,8 +140,8 @@ type Engine struct {
 	done   chan struct{}
 
 	shutdownOnce sync.Once
-	// pumpCancel aborts the connection pumps' bandwidth waits. Closing done is
-	// not enough for a pump asleep in the limiter, so shutdown cancels this
+	// pumpCancel aborts the connection pumps' bandwidth waits. Closing done
+	// isn't enough for a pump asleep in the limiter, so shutdown cancels this
 	// before it waits for the pumps to return.
 	pumpCancel context.CancelFunc
 	dialerWG   sync.WaitGroup
@@ -181,16 +171,16 @@ func New(cfg Config) *Engine {
 		blacklist:     make(map[string]bool),
 		attempting:    make(map[string]bool),
 	}
-	// The verified-piece bitfield is created here rather than in Run so the
-	// upload path can read it before the download starts, without racing Run's
+	// The verified-piece bitfield is created here rather than in Run, so the
+	// upload path can read it before the download starts without racing Run's
 	// setup. Run only ever sets bits in it, under the scheduler's lock.
 	if e.meta != nil {
 		e.pieceCount = e.meta.PieceCount()
 		e.have = wire.NewBitfield(e.pieceCount)
 	}
-	// The stall reaper runs on a tick; it is the shortest of a quarter of the
-	// grace, 50 ms and one second, so expiry is never off by more than a tick
-	// without waking a finished engine repeatedly.
+	// The stall reaper ticks every stallTimeout/4, clamped to 50 ms..1 s, so
+	// expiry is never off by more than a tick without waking a finished engine
+	// repeatedly.
 	e.stallTick = cfg.StallTimeout / 4
 	if e.stallTick < 50*time.Millisecond {
 		e.stallTick = 50 * time.Millisecond
@@ -216,22 +206,22 @@ func (e *Engine) Run(ctx context.Context) error {
 	if meta == nil {
 		return errors.New("engine: no metainfo")
 	}
-	// Both torrent shapes are served by the same stream-over-files mapping, so
-	// nothing is refused here: either the caller supplied a store, or one is
+	// Both torrent shapes go through the same stream-over-files mapping, so
+	// nothing is refused here: either the caller supplied a store, or one gets
 	// opened for Output.
 	store := e.cfg.Store
 	if store == nil {
 		// Output is the ROOT of the content: a caller has already applied the
-		// torrent's name for a multi-file torrent. content.Open applies the
-		// same single/multi mapping the download and seed paths use, so the
-		// engine cannot disagree with them about where a piece lives.
+		// torrent's name for a multi-file torrent. content.Open uses the same
+		// single/multi mapping the download and seed paths do, so the engine
+		// can't disagree with them about where a piece lives.
 		var err error
 		store, err = content.Open(meta, e.cfg.Output)
 		if err != nil {
 			return fmt.Errorf("engine: open output %s: %w", e.cfg.Output, err)
 		}
-		// A store the engine opened is the engine's to close. One the caller
-		// supplied is left open, because the upload path reads through it.
+		// A store we opened is ours to close; one the caller supplied stays
+		// open, because the upload path reads through it.
 		defer store.Close()
 	}
 	e.store = store
@@ -241,7 +231,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		e.pieces[i] = newPiece(i, meta.PieceSize(i))
 	}
 	// Resume restores pieces before the first announce, so the scheduler never
-	// asks any peer for a piece we already hold.
+	// asks a peer for a piece we already hold.
 	if e.resume != nil {
 		if err := e.restore(store); err != nil {
 			return err
@@ -252,9 +242,9 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.done = make(chan struct{})
 
 	// The pumps get their own context so shutdown can always release one that
-	// is waiting for bandwidth: e.done is not part of that wait, and Run's
-	// caller has not necessarily cancelled (the download may have finished, or
-	// a fatal error may be tearing the engine down).
+	// is waiting for bandwidth: e.done isn't part of that wait, and Run's
+	// caller hasn't necessarily cancelled — the download may have finished, or
+	// a fatal error may be tearing the engine down.
 	pumpCtx, cancelPumps := context.WithCancel(ctx)
 	e.mu.Lock()
 	e.pumpCancel = cancelPumps
@@ -264,8 +254,8 @@ func (e *Engine) Run(ctx context.Context) error {
 	go e.runDialer(pumpCtx)
 	defer e.shutdown()
 
-	// A fatal reply here (a tracker that rejects our info-hash) is the one
-	// announce failure worth stopping for; transient ones are retried below.
+	// A fatal reply here — a tracker that rejects our info-hash — is the one
+	// announce failure worth stopping for; transient ones get retried below.
 	resp, err := e.announce(ctx, tracker.EventStarted)
 	if err != nil {
 		if tracker.IsFatal(err) {
@@ -275,9 +265,9 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 
 	if err := e.download(ctx, e.announceInterval(resp)); err != nil {
-		// Whatever ended the download — a signal, a no-progress trip, a
-		// storage failure — keep everything verified so far so the next run
-		// can resume. The sidecar is flushed last.
+		// Whatever ended the download — signal, no-progress trip, storage
+		// failure — keep everything verified so far so the next run can resume.
+		// The sidecar is flushed last.
 		e.finalizeState()
 		if errors.Is(err, context.Canceled) {
 			// A user interrupt, not a failure: say goodbye to the tracker.
@@ -286,8 +276,8 @@ func (e *Engine) Run(ctx context.Context) error {
 		return err
 	}
 
-	// The download is complete, so there is nothing left to resume: the
-	// sidecar is removed rather than left claiming an already-finished file.
+	// Nothing left to resume, so the sidecar is removed rather than left
+	// claiming an already-finished file.
 	if e.resume != nil {
 		if err := e.resume.Remove(); err != nil {
 			e.logf("engine: remove resume sidecar: %v", err)
@@ -309,12 +299,11 @@ func (e *Engine) Run(ctx context.Context) error {
 	return nil
 }
 
-// seedLoop keeps the swarm membership alive after the content is complete. It
-// lives here, not in the caller, because the announce bookkeeping (counters,
-// interval clamping, the tracker's event) is already here; the upload listener
-// runs independently and this loop only re-announces, so the tracker keeps
-// handing our address to leechers. It returns only when the context is
-// cancelled, after a best-effort goodbye.
+// seedLoop keeps us in the swarm after the content is complete. It lives here,
+// not in the caller, because the announce bookkeeping — counters, interval
+// clamping, the tracker's event — is already here. This loop only re-announces,
+// so the tracker keeps handing our address to leechers; the upload listener
+// runs independently. Returns on cancellation, after a best-effort goodbye.
 func (e *Engine) seedLoop(ctx context.Context, interval time.Duration) error {
 	e.logf("engine: seeding: uploads are live, re-announcing every %s", interval)
 	ticker := time.NewTicker(interval)
@@ -330,8 +319,8 @@ func (e *Engine) seedLoop(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-// uploadedBytes is the session upload count an announce reports. The engine
-// never serves peers, so this is whatever the caller's upload path counts.
+// The session upload count an announce reports: the engine never serves peers,
+// so this is whatever the caller's upload path counts.
 func (e *Engine) uploadedBytes() int64 {
 	if e.cfg.Uploaded == nil {
 		return 0
@@ -339,13 +328,13 @@ func (e *Engine) uploadedBytes() int64 {
 	return e.cfg.Uploaded()
 }
 
-// shutdown stops every goroutine the engine started and waits for them, so a
+// shutdown stops every goroutine the engine started and waits them out, so a
 // returned Run leaves nothing touching the engine's state.
 func (e *Engine) shutdown() {
 	e.shutdownOnce.Do(func() {
-		// Cancel the pumps' bandwidth waits before closing done and waiting
-		// for them: a pump asleep in the limiter does not observe done, and
-		// the waits below would never return.
+		// Cancel the pumps' bandwidth waits before closing done and waiting on
+		// them: a pump asleep in the limiter never sees done, and the waits
+		// below would never return.
 		e.mu.Lock()
 		cancel := e.pumpCancel
 		e.mu.Unlock()
@@ -359,15 +348,15 @@ func (e *Engine) shutdown() {
 		}
 		e.mu.Unlock()
 	})
-	// The dialer goroutine waits for its in-flight dials (which start the
-	// connection pumps) before it returns, so no pump can be added after that
-	// wait and the peerWG wait below is exhaustive.
+	// The dialer waits for its in-flight dials (which start the connection
+	// pumps) before it returns, so no pump can be added after that wait and
+	// the peerWG wait below is exhaustive.
 	e.dialerWG.Wait()
 	e.peerWG.Wait()
 }
 
 // download is the scheduler loop: it owns the pending-piece state, hands work
-// to idle peers, and folds in everything the connection pumps report.
+// to idle peers, and folds in whatever the connection pumps report.
 func (e *Engine) download(ctx context.Context, interval time.Duration) error {
 	announce := time.NewTicker(interval)
 	defer announce.Stop()
@@ -415,9 +404,9 @@ func (e *Engine) download(ctx context.Context, interval time.Duration) error {
 		if progressed {
 			lastProgress = time.Now()
 		}
-		// Persist on every pass: a piece that just verified marks the state
-		// dirty and is written before the loop waits again, so a kill here
-		// loses at most the pieces still in flight.
+		// Persist every pass: a just-verified piece marks the state dirty and
+		// is written before the loop waits again, so a kill here loses at most
+		// the pieces still in flight.
 		e.persist()
 		if time.Since(lastProgress) > noProgressTimeout {
 			e.mu.Lock()
@@ -435,7 +424,7 @@ func (e *Engine) reannounce(ctx context.Context) {
 	}
 }
 
-// announce performs one announce round and queues any new peers for dialling.
+// One announce round; any new peers get queued for dialling.
 func (e *Engine) announce(ctx context.Context, ev tracker.Event) (tracker.AnnounceResponse, error) {
 	e.mu.Lock()
 	done := e.bytesDone
@@ -460,7 +449,7 @@ func (e *Engine) announce(ctx context.Context, ev tracker.Event) (tracker.Announ
 	return resp, nil
 }
 
-// announceInterval clamps whatever the tracker asked for into a sane range.
+// Squeezes whatever the tracker asked for into a sane range.
 func (e *Engine) announceInterval(resp tracker.AnnounceResponse) time.Duration {
 	d := resp.Interval
 	if d <= 0 {
@@ -475,8 +464,8 @@ func (e *Engine) announceInterval(resp tracker.AnnounceResponse) time.Duration {
 	return d
 }
 
-// queuePeers asks the dialer for every peer we are not already talking to.
-// Unreachable ports and anything blacklisted are skipped rather than retried.
+// queuePeers hands the dialer every peer we're not already talking to. Zero
+// ports, nil IPs and blacklisted peers are skipped, not retried.
 func (e *Engine) queuePeers(ctx context.Context, peers []tracker.Peer) {
 	for _, peer := range peers {
 		if peer.Port == 0 || peer.IP == nil {
@@ -510,8 +499,8 @@ func (e *Engine) forgetAttempt(addr string) {
 	e.mu.Unlock()
 }
 
-// runDialer owns the outbound connections so a slow or dead peer never stalls
-// the scheduler.
+// runDialer owns outbound connections so a slow or dead peer can't stall the
+// scheduler.
 func (e *Engine) runDialer(ctx context.Context) {
 	defer e.dialerWG.Done()
 	defer e.dialWG.Wait()
@@ -561,7 +550,7 @@ func (e *Engine) dialPeer(ctx context.Context, peer tracker.Peer) {
 		e.dialFailed(addr, err)
 		return
 	}
-	// The handshake deadline is per connection setup; the pumps set their own
+	// The handshake deadline covers setup only; the pumps set their own
 	// per-operation deadlines from here on.
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		conn.Close()
@@ -585,13 +574,13 @@ func (e *Engine) dialPeer(ctx context.Context, peer tracker.Peer) {
 	}()
 }
 
-// dialFailed releases the dial slot so a later announce can retry the peer.
+// Releases the dial slot so a later announce can retry the peer.
 func (e *Engine) dialFailed(addr string, err error) {
 	e.forgetAttempt(addr)
 	e.logf("engine: peer %s: %v", addr, err)
 }
 
-// emit hands an event to the scheduler without ever blocking past shutdown.
+// Hands an event to the scheduler, never blocking past shutdown.
 func (e *Engine) emit(ev event) bool {
 	select {
 	case e.events <- ev:

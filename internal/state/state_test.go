@@ -56,9 +56,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
-// A sidecar carries both halves of its key. A copy placed at another output
+// A sidecar carries both halves of its key. A copy sitting at another output
 // path, or a record naming another torrent, must be refused rather than
-// adopted: that is the collision the keying rule exists to prevent.
+// adopted — that's the collision the keying rule exists to prevent.
 func TestLoadRejectsMismatchedIdentity(t *testing.T) {
 	const pieces = 5
 	dir := t.TempDir()
@@ -163,8 +163,8 @@ func TestLoadRejectsCorruptOrStaleRecords(t *testing.T) {
 }
 
 // TestSaveIsAtomic hammers Save from one goroutine while another reads: a
-// reader must only ever observe a whole sidecar, never a partial one. That is
-// the property the temp-file-plus-rename scheme buys.
+// reader must only ever observe a whole sidecar, never a partial one. That's
+// the property the temp-file-plus-rename dance buys.
 func TestSaveIsAtomic(t *testing.T) {
 	const pieces = 13
 	out := filepath.Join(t.TempDir(), "content.bin")

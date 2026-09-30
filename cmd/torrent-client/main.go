@@ -1,5 +1,5 @@
-// Command torrent-client is the entry point of the from-scratch BitTorrent
-// client. It hands the raw arguments to run, which owns the CLI contract.
+// Command torrent-client is the entry point. It hands the raw arguments to run,
+// which owns the CLI contract.
 package main
 
 import "os"

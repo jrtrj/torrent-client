@@ -6,10 +6,9 @@ import (
 	"strings"
 )
 
-// New returns the transport for one announce URL, chosen by its scheme:
-// http and https use the HTTP protocol, udp uses BEP 15. This is the single
-// place the two transports are told apart, so the engine keeps taking the
-// Tracker interface and never learns which wire protocol a swarm speaks.
+// New returns the transport for one announce URL, picked by scheme: http and
+// https speak the HTTP protocol, udp speaks BEP 15. This is the only place
+// they're told apart, so the engine just keeps taking the Tracker interface.
 func New(announceURL string) (Tracker, error) {
 	u, err := url.Parse(strings.TrimSpace(announceURL))
 	if err != nil {

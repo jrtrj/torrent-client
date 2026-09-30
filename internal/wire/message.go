@@ -22,13 +22,12 @@ const (
 	IDExtended byte = 20
 )
 
-// IDKeepAlive is not a wire id: a zero length prefix carries no id byte at
-// all, so this sentinel lets callers handle keep-alives in the same switch as
-// real messages.
+// IDKeepAlive is not a wire id: a zero length prefix carries no id byte at all,
+// so this sentinel keeps keep-alives in the same switch as real messages.
 const IDKeepAlive byte = 0xff
 
-// Message is a decoded peer message. Only the fields meaningful for ID are
-// populated; everything else stays zero.
+// Message is a decoded peer message. Only the fields meaningful for ID are set;
+// the rest stay zero.
 //
 //   - Choke/Unchoke/Interested/NotInterested/KeepAlive: no payload
 //   - Have: Index
@@ -42,10 +41,9 @@ type Message struct {
 	Length   uint32
 	Block    []byte
 	Bitfield []byte
-	// Extended is the payload of an IDExtended message: a one-byte extension
-	// message id, then that extension's body. For a ut_metadata data message
-	// the body is a bencoded dictionary immediately followed by the raw
-	// metadata bytes, which is why it is kept as one opaque slice here.
+	// Extended is an IDExtended payload: a one-byte extension message id, then
+	// that extension's body. A ut_metadata data message appends raw metadata to
+	// a bencoded dictionary, so it arrives here as one opaque slice.
 	Extended []byte
 }
 
@@ -84,12 +82,12 @@ func (m Message) Encode() ([]byte, error) {
 	return frame, nil
 }
 
-// Decode reads one frame. A zero length prefix is a keep-alive. Payload shapes
+// Decode reads one frame; a zero length prefix is a keep-alive. Payload shapes
 // are validated so a malformed peer cannot make the engine index out of range.
 //
-// Unknown message ids are returned with their id set and no payload: BEP 3
-// reserves the id space for extensions, and dropping the connection over one
-// we do not know yet would be wrong. Callers ignore ids they do not handle.
+// An unknown id comes back with the id set and no payload — BEP 3 reserves that
+// space for extensions, and hanging up on one we don't know yet would be wrong.
+// Callers ignore ids they don't handle.
 func Decode(r io.Reader) (Message, error) {
 	var hdr [4]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -142,7 +140,6 @@ func Decode(r io.Reader) (Message, error) {
 		}
 		m.Extended = append([]byte(nil), payload...)
 	default:
-		// Unknown id: keep it decodable so the caller can skip it.
 	}
 	return m, nil
 }

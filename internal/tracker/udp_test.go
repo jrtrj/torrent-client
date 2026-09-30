@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// udpStub is a minimal in-process BEP 15 tracker. It owns a real UDP socket,
-// decodes the fixed-offset requests, and answers from whatever the running test
-// configured. Tests replace handler to script spoofs, runts, and error frames.
+// udpStub is a minimal in-process BEP 15 tracker: a real UDP socket, the
+// fixed-offset decode, and replies from whatever the running test configured.
+// Tests swap in handler to script spoofs, runts, and error frames.
 type udpStub struct {
 	t    *testing.T
 	conn *net.UDPConn
@@ -54,10 +54,9 @@ func newUDPStub(t *testing.T) *udpStub {
 	return s
 }
 
-// url starts the reply loop the first time the address is needed. Starting the
-// goroutine only after the caller has finished configuring the stub gives the
-// loop a happens-before edge over that configuration, so the test writes and
-// the loop reads never race.
+// url starts the reply loop the first time the address is needed, and not a
+// moment sooner. That happens-before edge over the caller's stub configuration
+// is the only damn thing keeping the test's writes and the loop's reads apart.
 func (s *udpStub) url() string {
 	s.once.Do(func() { go s.loop() })
 	return "udp://" + s.conn.LocalAddr().String() + "/announce"
@@ -87,7 +86,7 @@ func (s *udpStub) loop() {
 	}
 }
 
-// defaultHandler answers CONNECT, ANNOUNCE, and an ERROR frame when errMsg is
+// defaultHandler answers CONNECT and ANNOUNCE, plus an ERROR frame when errMsg is
 // set.
 func (s *udpStub) defaultHandler(req []byte, send func([]byte)) {
 	action := binary.BigEndian.Uint32(req[8:12])
@@ -170,16 +169,16 @@ func (s *udpStub) counts() (connects, announces int) {
 	return s.connects, s.announces
 }
 
-// fastRetry makes a transport fail quickly so tests that exercise the give-up
-// paths do not wait out the production backoff.
+// fastRetry makes a transport fail quickly, so the give-up tests don't sit out
+// the production backoff.
 func fastRetry(tr *UDPTracker) {
 	tr.retry = udpRetry{Attempts: 3, Base: 5 * time.Millisecond, Max: 10 * time.Millisecond}
 }
 
 func TestUDPAnnounceConnectsThenAnnouncesAndDecodesPeers(t *testing.T) {
 	s := newUDPStub(t)
-	// 127.0.0.1:8080 is real; 10.0.0.7:0 must be dropped exactly as the HTTP
-	// transport drops port-0 peers.
+	// 127.0.0.1:8080 is real; 10.0.0.7:0 gets dropped, same as the HTTP
+	// transport does with port-0 peers.
 	s.peers = append(compactPeer("127.0.0.1", 8080), compactPeer("10.0.0.7", 0)...)
 
 	tr, err := NewUDP(s.url())
@@ -211,8 +210,7 @@ func TestUDPAnnounceConnectsThenAnnouncesAndDecodesPeers(t *testing.T) {
 		t.Fatalf("connects/announces = %d/%d, want 1/1", connects, announces)
 	}
 
-	// The announce frame must carry the request's fields at their fixed
-	// offsets, and the CONNECT magic must have come first.
+	// The announce frame's fields must sit at their fixed offsets, after a CONNECT.
 	s.mu.Lock()
 	pkt := append([]byte(nil), s.lastAnnounce...)
 	s.mu.Unlock()
@@ -318,9 +316,8 @@ func TestUDPReconnectsWhenConnectionIDIsStale(t *testing.T) {
 	}
 }
 
-// A tracker that answers an announce with "connection id expired" must make
-// the client forget the cached id, so the next announce re-CONNECTs. This is
-// the tracker-side route to the same reconnect.
+// A tracker answering "connection id expired" must make the client forget the
+// cached id, so the next announce re-CONNECTs. Same reconnect, error-frame route.
 func TestUDPErrorFrameInvalidatesConnectionID(t *testing.T) {
 	s := newUDPStub(t)
 	s.mu.Lock()
@@ -347,7 +344,6 @@ func TestUDPErrorFrameInvalidatesConnectionID(t *testing.T) {
 		t.Fatalf("cached connection id = %#x, want it dropped", cached)
 	}
 
-	// With the id forgotten, the next announce must CONNECT again.
 	s.mu.Lock()
 	s.errMsg = ""
 	s.mu.Unlock()
@@ -359,8 +355,8 @@ func TestUDPErrorFrameInvalidatesConnectionID(t *testing.T) {
 	}
 }
 
-// Any datagram whose transaction id is not ours is a spoof or a stale reply:
-// it must be ignored, and the genuine reply that follows must win.
+// A datagram whose transaction id isn't ours means spoof or stale reply: drop
+// it, and let the genuine reply behind it win.
 func TestUDPIgnoresSpoofedTransactionID(t *testing.T) {
 	s := newUDPStub(t)
 	spoiled := compactPeer("1.2.3.4", 9999)
@@ -372,8 +368,8 @@ func TestUDPIgnoresSpoofedTransactionID(t *testing.T) {
 			return
 		}
 		tid := binary.BigEndian.Uint32(req[12:16])
-		// A forged announce reply with a foreign transaction id and an
-		// attacker-chosen peer, delivered before the real one.
+		// A forged reply — foreign transaction id, attacker-chosen peer —
+		// arriving before the genuine one.
 		spoof := make([]byte, udpAnnounceHeaderLen+len(spoiled))
 		binary.BigEndian.PutUint32(spoof[0:4], udpActionAnnounce)
 		binary.BigEndian.PutUint32(spoof[4:8], tid^0xdeadbeef)
@@ -401,8 +397,8 @@ func TestUDPIgnoresSpoofedTransactionID(t *testing.T) {
 	}
 }
 
-// Runts and unparseable datagrams must be dropped, not parsed and not fatal:
-// the real reply that follows still lands.
+// Runts and junk frames get dropped — not parsed, not fatal — and the real reply
+// behind them still lands.
 func TestUDPDropsMalformedDatagramsAndKeepsGoing(t *testing.T) {
 	s := newUDPStub(t)
 	s.peers = compactPeer("127.0.0.1", 6881)
@@ -432,8 +428,8 @@ func TestUDPDropsMalformedDatagramsAndKeepsGoing(t *testing.T) {
 	}
 }
 
-// With nothing but garbage on the wire the client gives up with a transient
-// error instead of panicking or hanging forever.
+// Nothing but garbage on the wire: fail transiently, don't panic, don't hang
+// forever.
 func TestUDPPermanentGarbageFailsTransientlyWithoutPanic(t *testing.T) {
 	s := newUDPStub(t)
 	s.handler = func(_ []byte, send func([]byte)) {
@@ -456,8 +452,8 @@ func TestUDPPermanentGarbageFailsTransientlyWithoutPanic(t *testing.T) {
 	}
 }
 
-// A datagram that succeeds the request but its reply is lost: the client must
-// retransmit and accept the answer to the retry.
+// The announce goes out but its reply is lost: the client has to retransmit and
+// take the answer to the retry.
 func TestUDPRetransmitsOnTimeout(t *testing.T) {
 	s := newUDPStub(t)
 	s.peers = compactPeer("127.0.0.1", 6881)
@@ -540,9 +536,8 @@ func TestUDPScrapeReportsSwarmCounters(t *testing.T) {
 	}
 }
 
-// The production backoff must stay bounded: BEP 15 allows ~8 minutes, which is
-// far too long for this client, so the cap over the whole request is the
-// contract being pinned here.
+// The production backoff has to stay bounded: BEP 15's ~8 minutes is far too long
+// for this client, so the total wait over one request is what's pinned here.
 func TestUDPBackoffIsBoundedByTheCap(t *testing.T) {
 	const cap = 15 * time.Second
 	p := defaultUDPRetry
@@ -574,8 +569,8 @@ func TestUDPBackoffIsBoundedByTheCap(t *testing.T) {
 	}
 }
 
-// The context must cut a stalled exchange short rather than let it run out the
-// backoff.
+// The context has to cut a stalled exchange short instead of letting it run out
+// the backoff.
 func TestUDPAnnounceHonoursContextCancellation(t *testing.T) {
 	s := newUDPStub(t)
 	s.handler = func(_ []byte, _ func([]byte)) {} // reply to nothing

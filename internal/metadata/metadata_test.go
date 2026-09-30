@@ -13,11 +13,10 @@ import (
 	"torrent-client/internal/wire"
 )
 
-// sampleInfo returns a real info dictionary together with its info-hash.
+// sampleInfo returns a real info dictionary and its info-hash.
 //
-// The piece list is deliberately large: 900 pieces is 18 KB of metadata, which
-// crosses the 16 KiB metadata-piece boundary, so the transfer genuinely spans
-// more than one ut_metadata piece instead of passing on a single request.
+// 900 pieces is 18 KB of metadata, deliberately past the 16 KiB metadata-piece
+// boundary, so the fetch has to span more than one ut_metadata piece.
 func sampleInfo(t *testing.T) ([]byte, [20]byte) {
 	t.Helper()
 	var buf bytes.Buffer
@@ -57,9 +56,8 @@ type fakePeer struct {
 	ln             net.Listener
 }
 
-// Peer options. They must be applied before the accept loop starts: the flags
-// are read by the connection goroutines and never written again, so setting
-// them up front is what keeps these tests race-free.
+// Peer options, applied before the accept loop starts: the flags are only ever
+// read by the connection goroutines, which is what keeps these tests race-free.
 func corruptingTheMetadata(p *fakePeer) { p.corrupt = true }
 func withoutExtensions(p *fakePeer)     { p.noExtensions = true }
 func withoutUTMetadata(p *fakePeer)     { p.noUTMetadata = true }
@@ -218,7 +216,7 @@ func TestFetchReassemblesAPieceFromThePeer(t *testing.T) {
 		t.Fatal("the fetched metadata does not hash to the requested info-hash")
 	}
 
-	// The bytes must be usable as a torrent: the whole point is to hand them
+	// The bytes have to be usable as a torrent: the whole point is to hand them
 	// to the parser and download from them.
 	m, err := metainfo.ParseInfoBytes(got, []string{"http://t/announce"})
 	if err != nil {
@@ -271,7 +269,7 @@ func TestFetchFailsWhenNoPeerHasIt(t *testing.T) {
 	other := hash
 	other[0] ^= 0xff
 
-	// Every peer's served metadata hashes to something else, so none of them
+	// Every peer serves metadata that hashes to something else, so none of them
 	// can be trusted no matter how well the transfer goes.
 	a := newFakePeer(t, hash, meta, corruptingTheMetadata)
 	b := newFakePeer(t, hash, meta, withoutExtensions)
