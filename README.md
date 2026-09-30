@@ -11,8 +11,8 @@ The **Wayfinder map** (GitHub Issues) is still resolving the open design decisio
 `docs/build-spec.md` — the consolidated build spec. The repository skeleton and the
 walking skeleton now exist: the client downloads a **single-file** torrent end to end
 from the local swarm (metainfo → announce → handshake → sequential piece fetch → SHA-1
-verify → write to disk). Not implemented yet: multi-file torrents, magnet links,
-resuming, the live dashboard, client-side seeding, UDP trackers, and rate limiting.
+verify → write to disk). Not implemented yet: multi-file torrents, magnet links, UDP
+trackers, and multi-file resume state.
 
 ## Artifacts
 
@@ -37,8 +37,10 @@ torrent-client [flags] <torrent-file | magnet-uri> <output-path>
 ```
 
 Flags: `-port` (default 6881), `-seed`, `-max-down-rate`, `-max-up-rate` (for example
-`512k` or `2M`; omitted means unlimited). Flags must come before the two positional
-arguments. Run `torrent-client -h` for the full list.
+`512k` or `2M`; omitted means unlimited). The two rate caps are enforced in both
+directions: `-max-down-rate` paces the bytes the client accepts, `-max-up-rate` paces the
+bytes it serves (it needs `-seed` to have anything to serve). Flags must come before the
+two positional arguments. Run `torrent-client -h` for the full list.
 
 Exit codes: `0` success, `1` fatal error, `2` usage error.
 
@@ -68,8 +70,9 @@ verifies the path without any manual setup.
   codec, which may use `github.com/jackpal/bencode-go` — the only third-party module
   (user decision after initial zero-dependency plan).
 - Features: core debug/rewrite of the protocol stack (BEP 0003), live terminal
-  dashboard, resumable downloads, seeding/upload handler.
+  dashboard, resumable downloads, seeding/upload handler, token-bucket bandwidth
+  limiting per direction.
 - Sequenced bonus features: BEP 0009 (magnet + ut_metadata) → BEP 0015 (UDP tracker)
-  → multi-file torrents → token-bucket bandwidth limiting.
+  → multi-file torrents.
 - Verified against a self-seeded localhost swarm (in-repo `cmd/devtracker` + seeder)
   and a real public torrent.

@@ -388,9 +388,10 @@ func testPayload(t *testing.T, n int) []byte {
 }
 
 type engineRun struct {
-	eng *Engine
-	out string
-	err <-chan error
+	eng    *Engine
+	out    string
+	err    <-chan error
+	cancel context.CancelFunc
 }
 
 // startEngine runs one engine against the given peers in the background.
@@ -413,7 +414,7 @@ func startEngine(t *testing.T, meta *metainfo.MetaInfo, peers []tracker.Peer, tw
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { errs <- eng.Run(ctx) }()
 	t.Cleanup(cancel)
-	return &engineRun{eng: eng, out: out, err: errs}
+	return &engineRun{eng: eng, out: out, err: errs, cancel: cancel}
 }
 
 func (r *engineRun) wait(t *testing.T, d time.Duration) {

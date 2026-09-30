@@ -145,15 +145,34 @@ func Truncate(s string, width int) string {
 	return b.String()
 }
 
+// LimitBadge names the active bandwidth caps, or returns the empty string when
+// neither direction is capped. Only the capped directions are named, so the
+// field stays short enough to survive a narrowing terminal and an unlimited
+// run shows nothing at all.
+func LimitBadge(st engine.Stats) string {
+	var b strings.Builder
+	b.WriteString("cap")
+	if st.MaxDownRate > 0 {
+		b.WriteString(" \u2193" + HumanRate(float64(st.MaxDownRate)))
+	}
+	if st.MaxUpRate > 0 {
+		b.WriteString(" \u2191" + HumanRate(float64(st.MaxUpRate)))
+	}
+	if b.Len() == len("cap") {
+		return ""
+	}
+	return b.String()
+}
+
 // Render builds one complete sticky-line frame from an engine snapshot and a
 // caller-smoothed bytes/second rate, limited to width columns. It is pure: no
 // terminal, no clock, no state, so it is the piece the rendering tests drive
 // directly.
 //
 // Fields are appended in priority order — rate, then ETA, then worker count,
-// then piece count — so as the terminal narrows the least useful fields drop
-// first; then the bar shrinks; then a rune-safe cut guarantees the line never
-// reaches the last column.
+// then piece count, then the active caps — so as the terminal narrows the least
+// useful fields drop first; then the bar shrinks; then a rune-safe cut
+// guarantees the line never reaches the last column.
 func Render(st engine.Stats, rate float64, width int) string {
 	// One column is deliberately left free. Writing into the final column
 	// puts many terminals into a "pending wrap" state, and the next byte
@@ -173,6 +192,7 @@ func Render(st engine.Stats, rate float64, width int) string {
 		"ETA " + ETA(st.BytesTotal-st.BytesDone, rate),
 		fmt.Sprintf("%d/%d workers", st.PeersActive, len(st.Peers)),
 		fmt.Sprintf("%d pieces", st.PiecesDone),
+		LimitBadge(st),
 	}
 	for _, f := range fields {
 		if f == "" {

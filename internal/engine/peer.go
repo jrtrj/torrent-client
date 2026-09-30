@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -137,7 +138,15 @@ func (p *peerConn) close() {
 // readLoop is this connection's message pump. Bitfield/have are forwarded so
 // the scheduler can decide what the peer is worth; choke state is folded in
 // here as well, because it belongs to the connection, not to any worker.
-func (p *peerConn) readLoop() {
+//
+// The download cap is enforced here, at the point a block is accepted. Shaping
+// accepted bytes rather than pacing the request loop is the deliberate choice:
+// requests are what keep a peer's window full, so throttling the asking would
+// drain the pipeline and collapse throughput into a round-trip per block,
+// while throttling the intake leaves the pipe full and the transfer merely
+// paced. Blocking this loop also backpressures the wire through TCP, so a
+// peer is told to slow down rather than the client buffering without bound.
+func (p *peerConn) readLoop(ctx context.Context) {
 	defer p.eng.peerGone(p)
 	for {
 		if err := p.conn.SetReadDeadline(time.Now().Add(idleTimeout)); err != nil {
@@ -167,6 +176,12 @@ func (p *peerConn) readLoop() {
 				return
 			}
 		case wire.IDPiece:
+			// A cancelled download must not sit here: the wait takes the
+			// engine's context and returns as soon as it is done, which is
+			// what tears the pump down instead of leaking a goroutine.
+			if err := p.eng.limiter.Wait(ctx, len(m.Block)); err != nil {
+				return
+			}
 			if !p.eng.emit(event{kind: evBlock, peer: p, addr: p.addr, index: int(m.Index), begin: m.Begin, data: m.Block}) {
 				return
 			}

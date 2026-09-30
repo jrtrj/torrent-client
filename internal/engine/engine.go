@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"torrent-client/internal/metainfo"
+	"torrent-client/internal/ratelimit"
 	"torrent-client/internal/state"
 	"torrent-client/internal/storage"
 	"torrent-client/internal/tracker"
@@ -64,6 +65,11 @@ type Config struct {
 	Output  string
 	Tracker tracker.Tracker
 
+	// MaxDownRate caps the download at this many bytes per second; zero means
+	// unlimited. Control frames are not counted against it — only content
+	// bytes are, which is what the cap is about.
+	MaxDownRate int64
+
 	// Store optionally supplies the content store. When nil the engine opens
 	// Output itself and closes it when Run returns. A caller-supplied store is
 	// left open: the caller owns it, which is what lets the upload path read
@@ -111,6 +117,10 @@ type Engine struct {
 	store  *storage.Storage
 	resume *state.Store
 
+	// limiter is the download direction's token bucket. The upload path has
+	// its own, owned by whoever runs the inbound listener.
+	limiter *ratelimit.Limiter
+
 	pipelineDepth int
 	stallTimeout  time.Duration
 	stallTick     time.Duration
@@ -139,9 +149,13 @@ type Engine struct {
 	done   chan struct{}
 
 	shutdownOnce sync.Once
-	dialerWG     sync.WaitGroup
-	dialWG       sync.WaitGroup
-	peerWG       sync.WaitGroup
+	// pumpCancel aborts the connection pumps' bandwidth waits. Closing done is
+	// not enough for a pump asleep in the limiter, so shutdown cancels this
+	// before it waits for the pumps to return.
+	pumpCancel context.CancelFunc
+	dialerWG   sync.WaitGroup
+	dialWG     sync.WaitGroup
+	peerWG     sync.WaitGroup
 }
 
 // New builds an engine for one download.
@@ -159,6 +173,7 @@ func New(cfg Config) *Engine {
 		cfg:           cfg,
 		meta:          cfg.Meta,
 		resume:        cfg.Resume,
+		limiter:       ratelimit.New(cfg.MaxDownRate),
 		pipelineDepth: cfg.PipelineDepth,
 		stallTimeout:  cfg.StallTimeout,
 		peers:         make(map[string]*peerState),
@@ -232,8 +247,17 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.dials = make(chan tracker.Peer, dialBuffer)
 	e.done = make(chan struct{})
 
+	// The pumps get their own context so shutdown can always release one that
+	// is waiting for bandwidth: e.done is not part of that wait, and Run's
+	// caller has not necessarily cancelled (the download may have finished, or
+	// a fatal error may be tearing the engine down).
+	pumpCtx, cancelPumps := context.WithCancel(ctx)
+	e.mu.Lock()
+	e.pumpCancel = cancelPumps
+	e.mu.Unlock()
+
 	e.dialerWG.Add(1)
-	go e.runDialer(ctx)
+	go e.runDialer(pumpCtx)
 	defer e.shutdown()
 
 	// A fatal reply here (a tracker that rejects our info-hash) is the one
@@ -315,6 +339,15 @@ func (e *Engine) uploadedBytes() int64 {
 // returned Run leaves nothing touching the engine's state.
 func (e *Engine) shutdown() {
 	e.shutdownOnce.Do(func() {
+		// Cancel the pumps' bandwidth waits before closing done and waiting
+		// for them: a pump asleep in the limiter does not observe done, and
+		// the waits below would never return.
+		e.mu.Lock()
+		cancel := e.pumpCancel
+		e.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 		close(e.done)
 		e.mu.Lock()
 		for _, p := range e.peers {
@@ -544,7 +577,7 @@ func (e *Engine) dialPeer(ctx context.Context, peer tracker.Peer) {
 	}()
 	go func() {
 		defer e.peerWG.Done()
-		pc.readLoop()
+		pc.readLoop(ctx)
 	}()
 }
 
