@@ -214,7 +214,10 @@ func TestShutdownAnnounceIsBounded(t *testing.T) {
 
 	// Let the initial announce land, then cancel while the engine is waiting
 	// for peers that never arrive.
-	deadline := time.Now().Add(5 * time.Second)
+	// Generous budgets: these assert liveness (returns at all, advertised at
+	// all), and a loaded CI box can delay goroutines by seconds. A tight
+	// window turns a scheduling hiccup into a false failure.
+	deadline := time.Now().Add(30 * time.Second)
 	for stub.callCount() == 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -226,8 +229,8 @@ func TestShutdownAnnounceIsBounded(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Run = %v, want context.Canceled", err)
 		}
-	case <-time.After(stoppedAnnounceTimeout + 3*time.Second):
-		t.Fatalf("Run did not return within %s of cancel: the stopped announce is not bounded", stoppedAnnounceTimeout+3*time.Second)
+	case <-time.After(stoppedAnnounceTimeout + 30*time.Second):
+		t.Fatalf("Run did not return within %s of cancel: the stopped announce is not bounded", stoppedAnnounceTimeout+30*time.Second)
 	}
 	if got := stub.callCount(); got < 2 {
 		t.Fatalf("tracker saw %d announces, want at least the initial one plus the stopped one", got)

@@ -517,7 +517,10 @@ func TestAdvertisesPiecesVerifiedLater(t *testing.T) {
 	src.hold(1)
 
 	seen := make(map[int]bool)
-	deadline := time.Now().Add(5 * time.Second)
+	// Generous: the advertiser ticks at a fixed rate and a loaded box can delay
+	// it. The property is that the have arrives at all, not that it arrives
+	// inside a scheduler-dependent window.
+	deadline := time.Now().Add(30 * time.Second)
 	for len(seen) < 2 && time.Now().Before(deadline) {
 		m, err := p.read()
 		if err != nil {

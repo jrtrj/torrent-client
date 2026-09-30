@@ -19,6 +19,7 @@ import (
 	"torrent-client/internal/state"
 	"torrent-client/internal/storage"
 	"torrent-client/internal/tracker"
+	"torrent-client/internal/ui"
 )
 
 // seedSource adapts the download engine and the content store to the upload
@@ -63,8 +64,15 @@ func (s *seedSource) ReadBlock(index int, begin, length uint32) ([]byte, error) 
 // download the content, and report the exit code. Everything that can go
 // wrong here is a runtime failure, so it maps to exitFatal.
 func execute(cfg config, stdout, stderr io.Writer) int {
+	// The live display owns stderr from here on. Events are reported through
+	// it so they scroll beneath the sticky progress line instead of being
+	// overwritten by it; on a stream that cannot take cursor control it
+	// degrades to the plain appended lines the tests read.
+	dash := ui.New(stderr)
+	defer dash.Close()
+
 	fail := func(err error) int {
-		fmt.Fprintf(stderr, "torrent-client: %v\n", err)
+		dash.Eventf("torrent-client: %v", err)
 		return exitFatal
 	}
 
@@ -103,8 +111,12 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// The redraw loop runs for the whole download; on a non-terminal stream it
+	// returns immediately and the logf below stays a plain line writer.
+	go dash.Run(ctx)
+
 	logf := func(format string, args ...any) {
-		fmt.Fprintf(stderr, "torrent-client: "+format+"\n", args...)
+		dash.Eventf("torrent-client: "+format, args...)
 	}
 	logf("downloading %q (%d pieces, %d bytes) to %s",
 		meta.Info.Name, meta.PieceCount(), meta.TotalLength(), output)
@@ -171,11 +183,14 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		if source != nil {
 			source.setEngine(eng)
 		}
+		// Point the sticky line at this engine's counters for as long as it
+		// runs; a retry with the next tracker replaces the source.
+		dash.Track(eng.Stats)
 		if err := eng.Run(ctx); err != nil {
 			if ctx.Err() != nil {
 				// Ctrl-C during the download: a clean stop, not a failure.
 				// The state flushed above is enough to resume next time.
-				fmt.Fprintf(stderr, "torrent-client: interrupted; resume state saved for %s\n", output)
+				dash.Eventf("torrent-client: interrupted; resume state saved for %s", output)
 				return exitOK
 			}
 			logf("tracker %s failed: %v", announceURL, err)
@@ -185,6 +200,9 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		lastErr = nil
 		break
 	}
+	// No engine is running any more, so retire the progress line before the
+	// final messages; otherwise a stale frame would sit above them.
+	dash.Track(nil)
 	if lastErr != nil {
 		return fail(fmt.Errorf("download failed: %w", lastErr))
 	}
@@ -192,10 +210,10 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	// With -seed, Run returns only when the context is cancelled: the client
 	// stayed in the swarm, uploading, until then.
 	if cfg.seed {
-		fmt.Fprintf(stderr, "torrent-client: seeding stopped: %s\n", output)
+		dash.Eventf("torrent-client: seeding stopped: %s", output)
 		return exitOK
 	}
-	fmt.Fprintf(stderr, "torrent-client: download complete: %s\n", output)
+	dash.Eventf("torrent-client: download complete: %s", output)
 	return exitOK
 }
 
