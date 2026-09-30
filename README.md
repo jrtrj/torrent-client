@@ -17,8 +17,9 @@ starts once the map closes.
 
 ## Tech posture
 
-- Go 1.27 (per go.mod), standard library only — bencode codec, tracker clients,
-  wire protocol, and dashboard are all hand-written.
+- Go 1.27 (per go.mod). Hand-rolled on the standard library everywhere except the bencode
+  codec, which may use `github.com/jackpal/bencode-go` — the only third-party module
+  (user decision after initial zero-dependency plan).
 - Features: core debug/rewrite of the protocol stack (BEP 0003), live terminal
   dashboard, resumable downloads, seeding/upload handler.
 - Sequenced bonus features: BEP 0009 (magnet + ut_metadata) → BEP 0015 (UDP tracker)
