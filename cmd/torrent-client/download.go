@@ -8,11 +8,11 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 
+	"torrent-client/internal/content"
 	"torrent-client/internal/engine"
 	"torrent-client/internal/metainfo"
 	"torrent-client/internal/ratelimit"
@@ -88,9 +88,6 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	if meta.Multifile() {
-		return fail(fmt.Errorf("multi-file torrents are not implemented yet"))
-	}
 	trackers := meta.Trackers()
 	if len(trackers) == 0 {
 		return fail(fmt.Errorf("the torrent has no tracker to announce to"))
@@ -100,7 +97,19 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(fmt.Errorf("generate peer id: %w", err))
 	}
-	output := resolveOutput(cfg.output, meta.Info.Name)
+
+	// Where the content lands, and the store that speaks that layout. Both come
+	// from internal/content so the download and seed paths cannot disagree
+	// about which file a piece lives in.
+	output, err := content.OutputFor(meta, cfg.output)
+	if err != nil {
+		return fail(err)
+	}
+	store, err := content.Open(meta, output)
+	if err != nil {
+		return fail(err)
+	}
+	defer store.Close()
 
 	// The resume sidecar is keyed to this torrent's info-hash and this output
 	// path, so a leftover sidecar from another torrent or another output is
@@ -130,21 +139,12 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	// the port we actually serve on and the listener is live while we fetch,
 	// which is what lets a piece become servable the moment it verifies.
 	var (
-		store     *storage.Storage
 		srv       *seed.Server
 		source    *seedSource
 		upLimiter *ratelimit.Limiter
 		uploaded  func() int64
 	)
 	if cfg.seed {
-		store, err = storage.Open(output, meta.Info.PieceLength, meta.TotalLength())
-		if err != nil {
-			return fail(fmt.Errorf("open %s for seeding: %w", output, err))
-		}
-		// The store outlives the engine: the upload path reads the same file
-		// the download writes, so this is the one owner.
-		defer store.Close()
-
 		// The upload direction gets its own bucket: throttling the download
 		// must not throttle the pieces we serve, and the other way round.
 		upLimiter = ratelimit.New(cfg.maxUpRate)
@@ -253,19 +253,6 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	}
 	dash.Eventf("torrent-client: download complete: %s", output)
 	return exitOK
-}
-
-// resolveOutput decides where a single-file torrent's content goes. A path
-// that names an existing directory, or that ends in a separator, holds the
-// file under the torrent's name; anything else is the file itself.
-func resolveOutput(output, name string) string {
-	if strings.HasSuffix(output, string(os.PathSeparator)) {
-		return filepath.Join(output, name)
-	}
-	if info, err := os.Stat(output); err == nil && info.IsDir() {
-		return filepath.Join(output, name)
-	}
-	return output
 }
 
 // newPeerID builds an Azureus-style id: a client tag plus random bytes.

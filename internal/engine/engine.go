@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"torrent-client/internal/content"
 	"torrent-client/internal/metainfo"
 	"torrent-client/internal/ratelimit"
 	"torrent-client/internal/state"
@@ -215,14 +216,17 @@ func (e *Engine) Run(ctx context.Context) error {
 	if meta == nil {
 		return errors.New("engine: no metainfo")
 	}
-	if meta.Multifile() {
-		return errors.New("engine: multi-file torrents are not supported yet")
-	}
-
+	// Both torrent shapes are served by the same stream-over-files mapping, so
+	// nothing is refused here: either the caller supplied a store, or one is
+	// opened for Output.
 	store := e.cfg.Store
 	if store == nil {
+		// Output is the ROOT of the content: a caller has already applied the
+		// torrent's name for a multi-file torrent. content.Open applies the
+		// same single/multi mapping the download and seed paths use, so the
+		// engine cannot disagree with them about where a piece lives.
 		var err error
-		store, err = storage.Open(e.cfg.Output, meta.Info.PieceLength, meta.TotalLength())
+		store, err = content.Open(meta, e.cfg.Output)
 		if err != nil {
 			return fmt.Errorf("engine: open output %s: %w", e.cfg.Output, err)
 		}

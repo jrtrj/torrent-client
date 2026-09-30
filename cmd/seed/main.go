@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"time"
 
+	"torrent-client/internal/content"
 	"torrent-client/internal/metainfo"
 	"torrent-client/internal/seed"
 	"torrent-client/internal/storage"
@@ -89,9 +90,6 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay 
 	if err != nil {
 		return err
 	}
-	if meta.Multifile() {
-		return errors.New("multi-file torrents are not supported yet")
-	}
 	if trackerURL == "" {
 		urls := meta.Trackers()
 		if len(urls) == 0 {
@@ -100,7 +98,14 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay 
 		trackerURL = urls[0]
 	}
 
-	store, err := storage.Open(dataPath, meta.Info.PieceLength, meta.TotalLength())
+	// The same layout the client writes: a multi-file torrent lives under a
+	// directory named after it, so what was downloaded can be seeded back
+	// without rearranging it.
+	root, err := content.OutputFor(meta, dataPath)
+	if err != nil {
+		return err
+	}
+	store, err := content.Open(meta, root)
 	if err != nil {
 		return err
 	}

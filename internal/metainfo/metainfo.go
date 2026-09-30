@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"torrent-client/internal/bencode"
 )
@@ -175,9 +176,38 @@ func Parse(r io.Reader) (*MetaInfo, error) {
 	return m, nil
 }
 
+// validPathSegments rejects a path that could escape the output directory. The
+// torrent format puts no restriction on these strings, so a hostile .torrent
+// can legitimately declare "..", an absolute path or a Windows drive; the
+// parser refuses one here rather than letting it reach the filesystem. This is
+// belt to storage's braces: both layers check, so a caller that bypasses one
+// is still covered by the other.
+func validPathSegments(segs []string) error {
+	for _, s := range segs {
+		switch {
+		case s == "":
+			return errors.New("path segment is empty")
+		case s == "." || s == "..":
+			return fmt.Errorf("path segment %q is a relative directory reference", s)
+		case strings.ContainsRune(s, 0):
+			return errors.New("path segment contains a NUL byte")
+		case strings.ContainsAny(s, `/\`):
+			return fmt.Errorf("path segment %q contains a path separator", s)
+		case strings.ContainsRune(s, ':'):
+			return fmt.Errorf("path segment %q contains a colon", s)
+		}
+	}
+	return nil
+}
+
 func (m *MetaInfo) validate() error {
 	if m.Info.Name == "" {
 		return errors.New("metainfo: info dictionary has no name")
+	}
+	// The name becomes a file (single-file) or a directory (multi-file) under
+	// the output path, so it must be one safe path segment.
+	if err := validPathSegments([]string{m.Info.Name}); err != nil {
+		return fmt.Errorf("metainfo: name %q: %w", m.Info.Name, err)
 	}
 	if m.Info.PieceLength <= 0 {
 		return fmt.Errorf("metainfo: piece length %d is not positive", m.Info.PieceLength)
@@ -192,6 +222,9 @@ func (m *MetaInfo) validate() error {
 			}
 			if len(f.Path) == 0 {
 				return fmt.Errorf("metainfo: file %d has an empty path", i)
+			}
+			if err := validPathSegments(f.Path); err != nil {
+				return fmt.Errorf("metainfo: file %d: %w", i, err)
 			}
 		}
 	} else if m.Info.Length <= 0 {
