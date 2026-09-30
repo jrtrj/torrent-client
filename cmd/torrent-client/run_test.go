@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -135,16 +136,22 @@ func TestBadRateIsUsageError(t *testing.T) {
 	}
 }
 
-func TestWellFormedInvocationIsFatalUntilImplemented(t *testing.T) {
-	code, stdout, stderr := runCapture("fixture.torrent", "out/")
+// A well-formed invocation of a file that cannot be opened is a runtime
+// failure, not a usage error: the pipeline is implemented, so this exits 1.
+func TestWellFormedInvocationWithMissingTorrentIsFatal(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "fixture.torrent")
+	code, stdout, stderr := runCapture(missing, "out/")
 	if code != exitFatal {
 		t.Fatalf("exit = %d, want %d", code, exitFatal)
 	}
 	if stdout != "" {
-		t.Errorf("nothing should reach stdout yet, got %q", stdout)
+		t.Errorf("nothing should reach stdout, got %q", stdout)
 	}
-	if !strings.Contains(stderr, "not implemented") {
-		t.Errorf("expected a not-implemented message, got %q", stderr)
+	if !strings.Contains(stderr, "fixture.torrent") {
+		t.Errorf("expected the offending path in the message, got %q", stderr)
+	}
+	if strings.Contains(stderr, "Usage:") {
+		t.Errorf("a runtime failure should not print usage, got %q", stderr)
 	}
 }
 

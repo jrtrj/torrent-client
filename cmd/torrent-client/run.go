@@ -79,12 +79,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFatal
 	}
 
-	// A well-formed invocation currently has nothing to run: the protocol
-	// stack arrives with the walking-skeleton ticket. Report it as a fatal
-	// error rather than pretending to succeed.
-	_ = cfg
-	fmt.Fprintln(stderr, "torrent-client: download pipeline is not implemented yet (see ticket #18)")
-	return exitFatal
+	// The grammar is valid, so hand off to the download pipeline, which owns
+	// the fatal-error reporting from here on.
+	return execute(cfg, stdout, stderr)
 }
 
 // parseArgs turns raw arguments into a validated config. A help request is
