@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -128,7 +129,14 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	tr := tracker.NewHTTP(trackerURL)
+	// The torrent's announce URL picks the transport (http/https or udp).
+	tr, err := tracker.New(trackerURL)
+	if err != nil {
+		return err
+	}
+	if closer, ok := tr.(io.Closer); ok {
+		defer closer.Close()
+	}
 	// We hold every piece, so announce with left=0: the tracker counts us
 	// complete and hands our address to leechers straight away.
 	resp, err := tr.Announce(ctx, tracker.AnnounceRequest{
@@ -158,8 +166,12 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay 
 		return err
 	}
 
-	// Best-effort goodbye so the tracker drops us immediately.
-	_, _ = tr.Announce(context.Background(), tracker.AnnounceRequest{
+	// Best-effort goodbye so the tracker drops us immediately. The deadline
+	// bounds a lost datagram: a UDP announce retries on its own schedule and
+	// must not hold up the exit.
+	goodbye, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = tr.Announce(goodbye, tracker.AnnounceRequest{
 		InfoHash: meta.InfoHash,
 		PeerID:   peerID,
 		Port:     uint16(boundPort),
@@ -169,7 +181,7 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay 
 	return nil
 }
 
-func reannounce(ctx context.Context, tr *tracker.HTTPTracker, meta *metainfo.MetaInfo, peerID [20]byte, srv *seed.Server, port uint16, interval time.Duration) {
+func reannounce(ctx context.Context, tr tracker.Tracker, meta *metainfo.MetaInfo, peerID [20]byte, srv *seed.Server, port uint16, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

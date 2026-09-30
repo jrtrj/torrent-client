@@ -109,6 +109,74 @@ func TestEndToEndLoopbackDownload(t *testing.T) {
 	}
 }
 
+// TestEndToEndLoopbackDownloadOverUDP is the same walking skeleton over the
+// BEP 15 transport: the torrent announces to a udp:// URL, so both the real
+// CLI and the seeder have to speak the UDP protocol to find each other. It is
+// the only test that drives the scheme dispatcher through the real binary.
+func TestEndToEndLoopbackDownloadOverUDP(t *testing.T) {
+	if testing.Short() {
+		t.Skip("end-to-end download skipped in -short mode")
+	}
+
+	root := moduleRoot(t)
+	binDir := t.TempDir()
+	devtrackerBin := buildBinary(t, root, binDir, "./cmd/devtracker")
+	seedBin := buildBinary(t, root, binDir, "./cmd/seed")
+	clientBin := buildBinary(t, root, binDir, "./cmd/torrent-client")
+
+	// 1. Dev tracker, whose UDP listener is what this test announces to.
+	devtracker := startProcess(t, devtrackerBin, "-addr", "127.0.0.1:0", "-udp-addr", "127.0.0.1:0", "-interval", "2")
+	devtracker.waitForLine(t, "listening on", 20*time.Second)
+	udpLine := devtracker.waitForLine(t, "udp listening on", 20*time.Second)
+	udpAddr := strings.TrimSpace(udpLine[strings.Index(udpLine, "udp listening on ")+len("udp listening on "):])
+	announceURL := "udp://" + udpAddr + "/announce"
+
+	// 2. Fixture: 700 KiB across three 256 KiB pieces.
+	const pieceLength = 256 * 1024
+	payload := make([]byte, 700*1024)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	srcPath := filepath.Join(workDir, "payload.bin")
+	if err := os.WriteFile(srcPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	torrentPath := filepath.Join(workDir, "payload.torrent")
+	writeTorrent(t, torrentPath, announceURL, "payload.bin", pieceLength, payload)
+
+	// 3. The seeder announces over UDP as well, so the client can discover it.
+	// Reaching "ready" means its UDP announce was answered: the URL is a
+	// udp:// one, so nothing but the UDP transport could have served it.
+	seeder := startProcess(t, seedBin, torrentPath, srcPath)
+	seeder.waitForLine(t, "seed: announced to udp://", 20*time.Second)
+	seeder.waitForLine(t, "seed: ready", 20*time.Second)
+
+	// 4. The real CLI downloads it.
+	outPath := filepath.Join(t.TempDir(), "downloaded.bin")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	client := exec.CommandContext(ctx, clientBin, torrentPath, outPath)
+	var stdout, stderr bytes.Buffer
+	client.Stdout = &stdout
+	client.Stderr = &stderr
+	if err := client.Run(); err != nil {
+		t.Fatalf("client failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	t.Logf("client stderr:\n%s", stderr.String())
+
+	// 5. Byte-identical. The file can only have come from the peer the UDP
+	// tracker handed out, so this is the transport's end-to-end proof.
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("downloaded file differs: got %d bytes (sha256 %x), want %d bytes (sha256 %x)",
+			len(got), sha256.Sum256(got), len(payload), sha256.Sum256(payload))
+	}
+}
+
 func moduleRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

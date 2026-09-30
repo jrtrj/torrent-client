@@ -167,10 +167,6 @@ func NewUDP(announceURL string) (*UDPTracker, error) {
 func (t *UDPTracker) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.closeLocked()
-}
-
-func (t *UDPTracker) closeLocked() error {
 	if t.conn == nil {
 		return nil
 	}
