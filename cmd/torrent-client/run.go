@@ -30,7 +30,8 @@ Flags:
   -port int
         TCP port to announce and listen on for incoming peers (default 6881)
   -seed
-        keep seeding after the download completes
+        keep seeding after the download completes: listen on the announced
+        port and upload verified pieces, during the download and after it
   -max-down-rate size
         cap download throughput, e.g. 512k or 2M (default: unlimited)
   -max-up-rate size

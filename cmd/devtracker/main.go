@@ -49,9 +49,11 @@ func main() {
 
 // peer is one announcing swarm member.
 type peer struct {
-	ip   net.IP
-	port uint16
-	left int64
+	ip         net.IP
+	port       uint16
+	left       int64
+	uploaded   int64
+	downloaded int64
 }
 
 // tracker keeps exactly one swarm per info-hash.
@@ -80,11 +82,15 @@ func (t *tracker) announce(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	left, _ := strconv.ParseInt(q.Get("left"), 10, 64)
+	uploaded, _ := strconv.ParseInt(q.Get("uploaded"), 10, 64)
+	downloaded, _ := strconv.ParseInt(q.Get("downloaded"), 10, 64)
 
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
+
+	event := q.Get("event")
 
 	t.mu.Lock()
 	swarm := t.swarms[infoHash]
@@ -92,10 +98,16 @@ func (t *tracker) announce(w http.ResponseWriter, r *http.Request) {
 		swarm = make(map[string]peer)
 		t.swarms[infoHash] = swarm
 	}
-	if q.Get("event") == "stopped" {
+	if event == "stopped" {
 		delete(swarm, peerID)
 	} else {
-		swarm[peerID] = peer{ip: net.ParseIP(host), port: uint16(port), left: left}
+		swarm[peerID] = peer{
+			ip:         net.ParseIP(host),
+			port:       uint16(port),
+			left:       left,
+			uploaded:   uploaded,
+			downloaded: downloaded,
+		}
 	}
 
 	// left=0 marks a seeder, anything else a leecher: that distinction is what
@@ -117,6 +129,12 @@ func (t *tracker) announce(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	t.mu.Unlock()
+
+	// The uploaded/downloaded counters are logged so the swarm tests can show
+	// a serving client's counters actually moved. The peer id is binary, so it
+	// is printed hex.
+	fmt.Printf("devtracker: announce peer=%x uploaded=%d downloaded=%d left=%d event=%q\n",
+		peerID, uploaded, downloaded, left, event)
 
 	w.Header().Set("Content-Type", "text/plain")
 	if _, err := w.Write(response(t.interval, complete, incomplete, compact.Bytes())); err != nil {

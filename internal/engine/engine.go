@@ -55,11 +55,30 @@ const (
 // Config is everything one download needs. The tracker is injected so the
 // engine never constructs transports itself.
 type Config struct {
-	Meta    *metainfo.MetaInfo
-	PeerID  [20]byte
-	Port    uint16
+	Meta   *metainfo.MetaInfo
+	PeerID [20]byte
+	Port   uint16
+	// Output is where the single-file content is written. It is ignored when
+	// Store is supplied.
 	Output  string
 	Tracker tracker.Tracker
+
+	// Store optionally supplies the content store. When nil the engine opens
+	// Output itself and closes it when Run returns. A caller-supplied store is
+	// left open: the caller owns it, which is what lets the upload path read
+	// the same file the download path writes.
+	Store *storage.Storage
+
+	// Uploaded, when set, is the session's uploaded byte count reported to the
+	// tracker. The engine does not serve peers itself, so the number comes
+	// from the upload path.
+	Uploaded func() int64
+
+	// Seed keeps the engine in the swarm after the content is complete: Run
+	// does not return on completion but keeps re-announcing on the tracker's
+	// interval until the context is cancelled, then announces stopped. The
+	// upload listener is the caller's to run and outlives Run's return.
+	Seed bool
 
 	// Log receives one line per milestone. A nil Log discards them. Calls are
 	// serialised, so a Log that is not goroutine-safe is still usable.
@@ -133,6 +152,13 @@ func New(cfg Config) *Engine {
 		blacklist:     make(map[string]bool),
 		attempting:    make(map[string]bool),
 	}
+	// The verified-piece bitfield is created here rather than in Run so the
+	// upload path can read it before the download starts, without racing Run's
+	// setup. Run only ever sets bits in it, under the scheduler's lock.
+	if e.meta != nil {
+		e.pieceCount = e.meta.PieceCount()
+		e.have = wire.NewBitfield(e.pieceCount)
+	}
 	// The stall reaper runs on a tick; it is the shortest of a quarter of the
 	// grace, 50 ms and one second, so expiry is never off by more than a tick
 	// without waking a finished engine repeatedly.
@@ -165,15 +191,19 @@ func (e *Engine) Run(ctx context.Context) error {
 		return errors.New("engine: multi-file torrents are not supported yet")
 	}
 
-	store, err := storage.Open(e.cfg.Output, meta.Info.PieceLength, meta.TotalLength())
-	if err != nil {
-		return fmt.Errorf("engine: open output %s: %w", e.cfg.Output, err)
+	store := e.cfg.Store
+	if store == nil {
+		var err error
+		store, err = storage.Open(e.cfg.Output, meta.Info.PieceLength, meta.TotalLength())
+		if err != nil {
+			return fmt.Errorf("engine: open output %s: %w", e.cfg.Output, err)
+		}
+		// A store the engine opened is the engine's to close. One the caller
+		// supplied is left open, because the upload path reads through it.
+		defer store.Close()
 	}
-	defer store.Close()
 	e.store = store
 
-	e.pieceCount = meta.PieceCount()
-	e.have = wire.NewBitfield(e.pieceCount)
 	e.pieces = make([]*pieceState, e.pieceCount)
 	for i := range e.pieces {
 		e.pieces[i] = newPiece(i, meta.PieceSize(i))
@@ -208,7 +238,41 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.logf("engine: complete: pieces %d/%d, bytes verified %d/%d, bytes in %d, blocks received %d, stalled %d, duplicate %d, bad pieces %d, peers used %d, max active peers %d",
 		s.PiecesDone, s.Pieces, s.BytesDone, s.BytesTotal, s.BytesIn,
 		s.BlocksReceived, s.BlocksStalled, s.BlocksDuplicate, s.BadPieces, s.PeersUsed, s.PeersMaxActive)
+
+	if e.cfg.Seed {
+		return e.seedLoop(ctx, e.announceInterval(resp))
+	}
 	return nil
+}
+
+// seedLoop keeps the swarm membership alive after the content is complete. It
+// lives here, not in the caller, because the announce bookkeeping (counters,
+// interval clamping, the tracker's event) is already here; the upload listener
+// runs independently and this loop only re-announces, so the tracker keeps
+// handing our address to leechers. It returns only when the context is
+// cancelled, after a best-effort goodbye.
+func (e *Engine) seedLoop(ctx context.Context, interval time.Duration) error {
+	e.logf("engine: seeding: uploads are live, re-announcing every %s", interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			_, _ = e.announce(context.Background(), tracker.EventStopped)
+			return nil
+		case <-ticker.C:
+			e.reannounce(ctx)
+		}
+	}
+}
+
+// uploadedBytes is the session upload count an announce reports. The engine
+// never serves peers, so this is whatever the caller's upload path counts.
+func (e *Engine) uploadedBytes() int64 {
+	if e.cfg.Uploaded == nil {
+		return 0
+	}
+	return e.cfg.Uploaded()
 }
 
 // shutdown stops every goroutine the engine started and waits for them, so a
@@ -305,6 +369,7 @@ func (e *Engine) announce(ctx context.Context, ev tracker.Event) (tracker.Announ
 		InfoHash:   e.meta.InfoHash,
 		PeerID:     e.cfg.PeerID,
 		Port:       e.cfg.Port,
+		Uploaded:   e.uploadedBytes(),
 		Downloaded: done,
 		Left:       e.meta.TotalLength() - done,
 		Event:      ev,

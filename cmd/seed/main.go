@@ -2,11 +2,11 @@
 // serves it over the real peer protocol so a download can be verified offline.
 //
 // It is a harness counterpart to cmd/torrent-client, not a general-purpose
-// server: it unchokes anyone who asks and answers every request it can.
+// server. The serving itself lives in internal/seed, the same package the real
+// client uses, so there is one upload implementation rather than two.
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -19,15 +19,10 @@ import (
 	"time"
 
 	"torrent-client/internal/metainfo"
+	"torrent-client/internal/seed"
 	"torrent-client/internal/storage"
 	"torrent-client/internal/tracker"
 	"torrent-client/internal/wire"
-)
-
-const (
-	handshakeTimeout = 10 * time.Second
-	// maxRequestLength is the classic protocol ceiling for a single request.
-	maxRequestLength = 128 * 1024
 )
 
 const usageText = `seed — serve a .torrent's data over the peer wire protocol.
@@ -69,6 +64,25 @@ func main() {
 	}
 }
 
+// completeSource serves every piece of a torrent that is fully on disk.
+type completeSource struct {
+	store  *storage.Storage
+	pieces int
+	all    []byte
+}
+
+func newCompleteSource(store *storage.Storage, pieces int) completeSource {
+	return completeSource{store: store, pieces: pieces, all: wire.BitfieldComplete(pieces)}
+}
+
+func (s completeSource) Have(index int) bool { return index >= 0 && index < s.pieces }
+
+func (s completeSource) HaveBitfield() []byte { return s.all }
+
+func (s completeSource) ReadBlock(index int, begin, length uint32) ([]byte, error) {
+	return s.store.ReadBlock(index, begin, length)
+}
+
 func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay time.Duration) error {
 	meta, err := metainfo.Load(torrentPath)
 	if err != nil {
@@ -91,18 +105,25 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay 
 	}
 	defer store.Close()
 
-	// Bind first so the port we announce is the port we actually serve on.
-	ln, err := net.Listen("tcp", net.JoinHostPort(listen, strconv.Itoa(port)))
-	if err != nil {
-		return err
-	}
-	defer ln.Close()
-	boundPort := ln.Addr().(*net.TCPAddr).Port
-
 	peerID, err := newPeerID()
 	if err != nil {
 		return err
 	}
+
+	// Bind first so the port we announce is the port we actually serve on.
+	srv, err := seed.New(seed.Config{
+		Meta:       meta,
+		Source:     newCompleteSource(store, meta.PieceCount()),
+		PeerID:     peerID,
+		Listen:     net.JoinHostPort(listen, strconv.Itoa(port)),
+		ServeDelay: serveDelay,
+		Log:        func(format string, args ...any) { fmt.Printf("seed: "+format+"\n", args...) },
+	})
+	if err != nil {
+		return err
+	}
+	defer srv.Close()
+	boundPort := int(srv.Port())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -123,17 +144,17 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay 
 	}
 
 	fmt.Printf("seed: serving %q (%d pieces, %d bytes) on %s\n",
-		meta.Info.Name, meta.PieceCount(), meta.TotalLength(), ln.Addr())
+		meta.Info.Name, meta.PieceCount(), meta.TotalLength(), srv.Addr())
 	fmt.Printf("seed: announced to %s (interval %s)\n", trackerURL, resp.Interval)
 
 	interval := resp.Interval
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	go reannounce(ctx, tr, meta, peerID, uint16(boundPort), interval)
+	go reannounce(ctx, tr, meta, peerID, srv, uint16(boundPort), interval)
 
 	fmt.Println("seed: ready")
-	if err := serve(ctx, ln, meta, store, peerID, serveDelay); err != nil {
+	if err := srv.Serve(ctx); err != nil {
 		return err
 	}
 
@@ -148,100 +169,7 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay 
 	return nil
 }
 
-func serve(ctx context.Context, ln net.Listener, meta *metainfo.MetaInfo, store *storage.Storage, peerID [20]byte, serveDelay time.Duration) error {
-	all := wire.BitfieldComplete(meta.PieceCount())
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			// A cancelled context closes the listener, which is a clean exit.
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
-		}
-		go serveConn(conn, meta, store, peerID, all, serveDelay)
-	}
-}
-
-func serveConn(conn net.Conn, meta *metainfo.MetaInfo, store *storage.Storage, peerID [20]byte, all []byte, serveDelay time.Duration) {
-	defer conn.Close()
-
-	if err := conn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		return
-	}
-	if _, err := conn.Write(wire.NewHandshake(meta.InfoHash, peerID).Encode()); err != nil {
-		return
-	}
-	if _, err := wire.ReadHandshake(conn, meta.InfoHash); err != nil {
-		return // not our swarm: drop silently
-	}
-	// Clear the deadline: a seeding connection sits idle between requests.
-	if err := conn.SetDeadline(time.Time{}); err != nil {
-		return
-	}
-
-	r := bufio.NewReader(conn)
-	if err := wire.Write(conn, wire.Message{ID: wire.IDBitfield, Bitfield: all}); err != nil {
-		return
-	}
-
-	// This fixture unchokes anyone who asks: with a single peer there is no
-	// upload slot to compete for.
-	interested := false
-	for {
-		m, err := wire.Decode(r)
-		if err != nil {
-			return
-		}
-		switch m.ID {
-		case wire.IDInterested:
-			if !interested {
-				if err := wire.Write(conn, wire.Message{ID: wire.IDUnchoke}); err != nil {
-					return
-				}
-				interested = true
-			}
-		case wire.IDNotInterested:
-			interested = false
-		case wire.IDRequest:
-			if serveDelay > 0 {
-				time.Sleep(serveDelay)
-			}
-			if err := serveRequest(conn, meta, store, m); err != nil {
-				return
-			}
-		}
-		// Choke/unchoke/have/bitfield/cancel/keep-alive from the client do not
-		// change what we serve.
-	}
-}
-
-func serveRequest(conn net.Conn, meta *metainfo.MetaInfo, store *storage.Storage, m wire.Message) error {
-	index := int(m.Index)
-	if index < 0 || index >= meta.PieceCount() {
-		return fmt.Errorf("request for piece %d is out of range for %d pieces", index, meta.PieceCount())
-	}
-	if m.Length == 0 || m.Length > maxRequestLength {
-		return fmt.Errorf("request length %d is outside 1..%d", m.Length, maxRequestLength)
-	}
-	if int64(m.Begin)+int64(m.Length) > meta.PieceSize(index) {
-		return fmt.Errorf("request %d+%d overruns piece %d of %d bytes", m.Begin, m.Length, index, meta.PieceSize(index))
-	}
-
-	data, err := store.ReadBlock(index, m.Begin, m.Length)
-	if err != nil {
-		return err
-	}
-	if err := wire.Write(conn, wire.Message{ID: wire.IDPiece, Index: m.Index, Begin: m.Begin, Block: data}); err != nil {
-		return err
-	}
-	// Logged on purpose: the swarm tests read these lines to prove which
-	// seeder carried which block, and when.
-	fmt.Printf("seed: served piece=%d begin=%d length=%d\n", m.Index, m.Begin, len(data))
-	return nil
-}
-
-func reannounce(ctx context.Context, tr *tracker.HTTPTracker, meta *metainfo.MetaInfo, peerID [20]byte, port uint16, interval time.Duration) {
+func reannounce(ctx context.Context, tr *tracker.HTTPTracker, meta *metainfo.MetaInfo, peerID [20]byte, srv *seed.Server, port uint16, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -253,6 +181,7 @@ func reannounce(ctx context.Context, tr *tracker.HTTPTracker, meta *metainfo.Met
 				InfoHash: meta.InfoHash,
 				PeerID:   peerID,
 				Port:     port,
+				Uploaded: srv.Uploaded(),
 				Left:     0,
 				NumWant:  50,
 			}); err != nil {

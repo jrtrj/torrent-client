@@ -8,6 +8,8 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -482,4 +484,273 @@ func grepInt(t *testing.T, text, label string) int {
 		t.Fatalf("parse %q: %v", label, err)
 	}
 	return n
+}
+
+// freePort reserves a TCP port and releases it, so the next binder can use the
+// number. It is how the seeding client is given the concrete port it must
+// announce; the CLI rejects 0 as a usage error, so a real port is required.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// clientProc is the real CLI left running in the background with its stderr
+// streamed, so a test can assert on what it logged while it was alive.
+type clientProc struct {
+	cmd   *exec.Cmd
+	lines *lineLog
+	drain chan struct{}
+	once  sync.Once
+	werr  error
+}
+
+func startClient(t *testing.T, bin string, args ...string) *clientProc {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
+	cmd.Stdout = io.Discard
+	pipe, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start %s: %v", bin, err)
+	}
+	p := &clientProc{cmd: cmd, lines: &lineLog{}, drain: make(chan struct{})}
+	go func() {
+		defer close(p.drain)
+		scanner := bufio.NewScanner(pipe)
+		for scanner.Scan() {
+			p.lines.add(scanner.Text())
+		}
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		select {
+		case <-p.drain:
+		case <-time.After(5 * time.Second):
+		}
+		_ = p.wait()
+	})
+	return p
+}
+
+func (p *clientProc) waitFor(t *testing.T, substr string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, l := range p.lines.snapshot() {
+			if strings.Contains(l.text, substr) {
+				return l.text
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %q from %s;\nlog:\n%s",
+				timeout, substr, p.cmd.Path, p.logText())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// wait blocks until the drain has seen EOF (the process has exited) and then
+// reaps it, in the order StderrPipe requires.
+func (p *clientProc) wait() error {
+	p.once.Do(func() {
+		<-p.drain
+		p.werr = p.cmd.Wait()
+	})
+	return p.werr
+}
+
+// waitExit requires the process to exit within timeout, then reaps it.
+func (p *clientProc) waitExit(t *testing.T, timeout time.Duration) error {
+	t.Helper()
+	select {
+	case <-p.drain:
+	case <-time.After(timeout):
+		t.Fatalf("client %s did not exit within %s;\nlog:\n%s", p.cmd.Path, timeout, p.logText())
+	}
+	return p.wait()
+}
+
+// countLines is how many streamed lines contain substr.
+func (p *clientProc) countLines(substr string) int {
+	n := 0
+	for _, l := range p.lines.snapshot() {
+		if strings.Contains(l.text, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+func (p *clientProc) logText() string {
+	var b strings.Builder
+	for _, l := range p.lines.snapshot() {
+		b.WriteString(l.text)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// assertFileEquals requires path to hold exactly want.
+func assertFileEquals(t *testing.T, path string, want []byte) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("%s differs: got %d bytes (sha256 %x), want %d bytes (sha256 %x)",
+			path, len(got), sha256.Sum256(got), len(want), sha256.Sum256(want))
+	}
+}
+
+// trackerMaxUploaded is the highest uploaded= counter the dev tracker has
+// logged so far; the dev tracker prints one line per announce.
+func trackerMaxUploaded(p *recordedProcess) int64 {
+	var max int64
+	for _, l := range p.log.snapshot() {
+		i := strings.Index(l.text, "uploaded=")
+		if i < 0 {
+			continue
+		}
+		rest := l.text[i+len("uploaded="):]
+		end := 0
+		for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+			end++
+		}
+		if end == 0 {
+			continue
+		}
+		if n, err := strconv.ParseInt(rest[:end], 10, 64); err == nil && n > max {
+			max = n
+		}
+	}
+	return max
+}
+
+// TestEndToEndSeedingServesSecondClient is the upload proof. Client A starts
+// with -seed and downloads the fixture, keeping its listener up. The fixture
+// seeder is then stopped, so the only source left is A. A second client B
+// downloads the same torrent and must end up byte-identical, which is only
+// possible if A served it. The test also requires A to log served blocks, the
+// first client to have stayed alive after completing, and the dev tracker to
+// see A's uploaded counter move.
+func TestEndToEndSeedingServesSecondClient(t *testing.T) {
+	if testing.Short() {
+		t.Skip("end-to-end seeding skipped in -short mode")
+	}
+
+	root := moduleRoot(t)
+	binDir := t.TempDir()
+	devtrackerBin := buildBinary(t, root, binDir, "./cmd/devtracker")
+	seedBin := buildBinary(t, root, binDir, "./cmd/seed")
+	clientBin := buildBinary(t, root, binDir, "./cmd/torrent-client")
+
+	devtracker := startRecorded(t, devtrackerBin, "-addr", "127.0.0.1:0", "-interval", "1")
+	line := devtracker.waitFor(t, "listening on", 20*time.Second)
+	addr := strings.TrimSpace(line[strings.Index(line, "listening on ")+len("listening on "):])
+	announceURL := "http://" + addr + "/announce"
+
+	const pieceLength = 64 * 1024
+	payload := make([]byte, 3*pieceLength)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	srcPath := filepath.Join(workDir, "payload.bin")
+	if err := os.WriteFile(srcPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	torrentPath := filepath.Join(workDir, "payload.torrent")
+	infoBytes := writeTorrent(t, torrentPath, announceURL, "payload.bin", pieceLength, payload)
+
+	meta, err := metainfo.Load(torrentPath)
+	if err != nil {
+		t.Fatalf("metainfo.Load: %v", err)
+	}
+	if want := sha1.Sum(infoBytes); meta.InfoHash != want {
+		t.Fatalf("info-hash = %x, want %x", meta.InfoHash, want)
+	}
+
+	// The fixture seeder. A per-block delay widens A's download window, so A's
+	// listener is genuinely up while A is still fetching.
+	fixture := startRecorded(t, seedBin, "-serve-delay", "10ms", torrentPath, srcPath)
+	fixture.waitFor(t, "seed: ready", 20*time.Second)
+
+	// A downloads and then keeps seeding. It must bind the port it announces,
+	// so it is given a concrete free port (the CLI rejects -port 0).
+	port := freePort(t)
+	outA := filepath.Join(t.TempDir(), "A.bin")
+	a := startClient(t, clientBin, "-seed", "-port", strconv.Itoa(port), torrentPath, outA)
+	a.waitFor(t, "engine: seeding", 90*time.Second)
+	assertFileEquals(t, outA, payload)
+
+	// Stop the fixture so B has nothing but A to fetch from.
+	if err := fixture.cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("stop fixture seeder: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// B downloads the same torrent. Without A's upload path this cannot work.
+	outB := filepath.Join(t.TempDir(), "B.bin")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	bc := exec.CommandContext(ctx, clientBin, torrentPath, outB)
+	var bStderr bytes.Buffer
+	bc.Stderr = &bStderr
+	if err := bc.Run(); err != nil {
+		t.Fatalf("second client failed: %v\nstderr:\n%s", err, bStderr.String())
+	}
+	assertFileEquals(t, outB, payload)
+	t.Logf("second client stderr:\n%s", bStderr.String())
+
+	// A actually served blocks, not just held them.
+	if served := a.countLines("served piece="); served == 0 {
+		t.Fatalf("the seeding client served no blocks;\nlog:\n%s", a.logText())
+	} else {
+		t.Logf("seeding client served %d blocks", served)
+	}
+
+	// The tracker saw A's uploaded counter move: poll because the client
+	// re-announces on the tracker's interval.
+	deadline := time.Now().Add(20 * time.Second)
+	var uploaded int64
+	for time.Now().Before(deadline) {
+		if uploaded = trackerMaxUploaded(devtracker); uploaded > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if uploaded <= 0 {
+		t.Fatalf("the tracker never saw uploaded > 0 from the serving client;\ndev tracker log:\n%s",
+			devtracker.logText())
+	}
+	t.Logf("tracker saw uploaded=%d bytes from the swarm", uploaded)
+
+	// Ctrl-C while seeding is a clean exit, not a fatal one, and the client
+	// announces stopped on the way out.
+	if err := a.cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("interrupt seeding client: %v", err)
+	}
+	if err := a.waitExit(t, 15*time.Second); err != nil {
+		t.Fatalf("seeding client exited with %v, want 0;\nlog:\n%s", err, a.logText())
+	}
+	if a.countLines("seeding stopped") == 0 {
+		t.Fatalf("seeding client did not log a clean stop;\nlog:\n%s", a.logText())
+	}
+}
+
+func (r *recordedProcess) logText() string {
+	var b strings.Builder
+	for _, l := range r.log.snapshot() {
+		b.WriteString(l.text)
+		b.WriteString("\n")
+	}
+	return b.String()
 }

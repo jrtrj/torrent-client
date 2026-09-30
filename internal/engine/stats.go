@@ -3,6 +3,7 @@ package engine
 import (
 	"sort"
 
+	"torrent-client/internal/metainfo"
 	"torrent-client/internal/wire"
 )
 
@@ -60,6 +61,29 @@ type Stats struct {
 	Peers       []PeerStat
 	// Have is a copy of the bitfield of verified pieces.
 	Have []byte
+}
+
+// Meta is the torrent this engine is downloading. It is fixed for the engine's
+// life, so the upload path can read piece sizes and hashes from it.
+func (e *Engine) Meta() *metainfo.MetaInfo { return e.meta }
+
+// Have reports whether piece index has been downloaded, hash-verified, and
+// written, and so can be uploaded. It takes the scheduler's lock, so it is
+// safe to call from the upload path while Run is going; it returns false for
+// every piece until the download verifies them.
+func (e *Engine) Have(index int) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return wire.BitfieldHas(e.have, index)
+}
+
+// HaveBitfield returns a copy of the verified-piece bitfield, so the upload
+// path can advertise everything it holds in one snapshot. Safe to call while
+// Run is going.
+func (e *Engine) HaveBitfield() []byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]byte(nil), e.have...)
 }
 
 // Stats returns a snapshot of the download. Safe to call while Run is going.

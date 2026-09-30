@@ -10,8 +10,10 @@
 // same block; because a peer is only ever offered pieces its bitfield says it
 // holds, a peer that has nothing cannot be re-enqueued in a spin.
 //
-// It sits at the top of the internal layering and is the only package allowed
-// to combine tracker, wire, and storage.
+// It sits at the top of the internal layering: the download half of the
+// client, and the only package that combines tracker, wire, and storage. The
+// upload half is internal/seed, which combines wire and storage but knows
+// nothing about swarms or trackers.
 //
 // Import direction: engine may import bencode, tracker, wire, storage, and
 // state. Only the CLI and internal/ui may import engine.

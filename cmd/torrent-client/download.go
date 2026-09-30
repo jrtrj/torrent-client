@@ -5,15 +5,58 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 
 	"torrent-client/internal/engine"
 	"torrent-client/internal/metainfo"
+	"torrent-client/internal/seed"
+	"torrent-client/internal/storage"
 	"torrent-client/internal/tracker"
 )
+
+// seedSource adapts the download engine and the content store to the upload
+// path: the engine says which pieces are verified and servable, the store
+// hands out their bytes. The engine is replaced when the client retries with
+// another tracker, so the pointer is guarded.
+type seedSource struct {
+	store *storage.Storage
+
+	mu  sync.Mutex
+	eng *engine.Engine
+}
+
+func (s *seedSource) setEngine(eng *engine.Engine) {
+	s.mu.Lock()
+	s.eng = eng
+	s.mu.Unlock()
+}
+
+func (s *seedSource) Have(index int) bool {
+	s.mu.Lock()
+	eng := s.eng
+	s.mu.Unlock()
+	return eng != nil && eng.Have(index)
+}
+
+func (s *seedSource) HaveBitfield() []byte {
+	s.mu.Lock()
+	eng := s.eng
+	s.mu.Unlock()
+	if eng == nil {
+		return nil
+	}
+	return eng.HaveBitfield()
+}
+
+func (s *seedSource) ReadBlock(index int, begin, length uint32) ([]byte, error) {
+	return s.store.ReadBlock(index, begin, length)
+}
 
 // execute runs a validated invocation: load the metainfo, pick a tracker,
 // download the content, and report the exit code. Everything that can go
@@ -59,18 +102,67 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	logf("downloading %q (%d pieces, %d bytes) to %s",
 		meta.Info.Name, meta.PieceCount(), meta.TotalLength(), output)
 
+	// With -seed the client also uploads. The content store and the inbound
+	// listener come up before the first announce, so the port we advertise is
+	// the port we actually serve on and the listener is live while we fetch,
+	// which is what lets a piece become servable the moment it verifies.
+	var (
+		store    *storage.Storage
+		srv      *seed.Server
+		source   *seedSource
+		uploaded func() int64
+	)
+	if cfg.seed {
+		store, err = storage.Open(output, meta.Info.PieceLength, meta.TotalLength())
+		if err != nil {
+			return fail(fmt.Errorf("open %s for seeding: %w", output, err))
+		}
+		// The store outlives the engine: the upload path reads the same file
+		// the download writes, so this is the one owner.
+		defer store.Close()
+
+		source = &seedSource{store: store}
+		// Bind every interface: peers reach us on whatever address the tracker
+		// hands out, not on a loopback-only socket.
+		srv, err = seed.New(seed.Config{
+			Meta:   meta,
+			Source: source,
+			PeerID: peerID,
+			Listen: net.JoinHostPort("", strconv.Itoa(cfg.port)),
+			Log:    logf,
+		})
+		if err != nil {
+			return fail(err)
+		}
+		defer srv.Close()
+		uploaded = srv.Uploaded
+
+		go func() {
+			if err := srv.Serve(ctx); err != nil {
+				logf("seed listener: %v", err)
+			}
+		}()
+		logf("seeding on %s", srv.Addr())
+	}
+
 	// Try each announce URL in turn: a tracker that is down is not a reason to
 	// give up while another one knows the swarm.
 	var lastErr error
 	for _, announceURL := range trackers {
 		eng := engine.New(engine.Config{
-			Meta:    meta,
-			PeerID:  peerID,
-			Port:    uint16(cfg.port),
-			Output:  output,
-			Tracker: tracker.NewHTTP(announceURL),
-			Log:     logf,
+			Meta:     meta,
+			PeerID:   peerID,
+			Port:     uint16(cfg.port),
+			Output:   output,
+			Store:    store,
+			Tracker:  tracker.NewHTTP(announceURL),
+			Log:      logf,
+			Uploaded: uploaded,
+			Seed:     cfg.seed,
 		})
+		if source != nil {
+			source.setEngine(eng)
+		}
 		if err := eng.Run(ctx); err != nil {
 			if ctx.Err() != nil {
 				return fail(ctx.Err())
@@ -86,6 +178,12 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		return fail(fmt.Errorf("download failed: %w", lastErr))
 	}
 
+	// With -seed, Run returns only when the context is cancelled: the client
+	// stayed in the swarm, uploading, until then.
+	if cfg.seed {
+		fmt.Fprintf(stderr, "torrent-client: seeding stopped: %s\n", output)
+		return exitOK
+	}
 	fmt.Fprintf(stderr, "torrent-client: download complete: %s\n", output)
 	return exitOK
 }
