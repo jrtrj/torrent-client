@@ -1,3 +1,6 @@
-torrent-client
+# The built binary. Anchored, so cmd/torrent-client/ is not swept up with it.
+/torrent-client
 *.iso
 *.torrent
+# Fixtures the local-swarm tests need are committed on purpose.
+!testdata/**/*.torrent
