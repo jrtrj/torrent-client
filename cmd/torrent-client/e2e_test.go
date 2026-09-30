@@ -7,15 +7,19 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"torrent-client/internal/bencode"
 	"torrent-client/internal/metainfo"
+	"torrent-client/internal/wire"
 )
 
 // TestEndToEndLoopbackDownload is the walking-skeleton proof: it builds the
@@ -147,7 +151,7 @@ func startProcess(t *testing.T, name string, args ...string) *process {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start %s: %v", name, err)
 	}
-	lines := make(chan string, 64)
+	lines := make(chan string, 256)
 	go func() {
 		defer close(lines)
 		scanner := bufio.NewScanner(stdout)
@@ -229,4 +233,253 @@ func marshalBencode(t *testing.T, v any) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return buf.Bytes()
+}
+
+// TestEndToEndConcurrentPeers proves the client spreads one download across
+// more than one seeder at the same time. Both seeders log every block they
+// serve with a timestamp, so the test can show the two serving windows
+// overlap; the client's own statistics report the peak number of peers with
+// work in the request pipeline. No block may be fetched twice, which is what a
+// duplicated-work scheduler bug would produce.
+func TestEndToEndConcurrentPeers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("end-to-end download skipped in -short mode")
+	}
+
+	root := moduleRoot(t)
+	binDir := t.TempDir()
+	devtrackerBin := buildBinary(t, root, binDir, "./cmd/devtracker")
+	seedBin := buildBinary(t, root, binDir, "./cmd/seed")
+	clientBin := buildBinary(t, root, binDir, "./cmd/torrent-client")
+
+	devtracker := startProcess(t, devtrackerBin, "-addr", "127.0.0.1:0", "-interval", "2")
+	line := devtracker.waitForLine(t, "listening on", 20*time.Second)
+	addr := strings.TrimSpace(line[strings.Index(line, "listening on ")+len("listening on "):])
+	announceURL := "http://" + addr + "/announce"
+
+	// Three 256 KiB pieces, 48 blocks of 16 KiB in total.
+	const pieceLength = 256 * 1024
+	payload := make([]byte, 3*pieceLength)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	srcPath := filepath.Join(workDir, "payload.bin")
+	if err := os.WriteFile(srcPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	torrentPath := filepath.Join(workDir, "payload.torrent")
+	writeTorrent(t, torrentPath, announceURL, "payload.bin", pieceLength, payload)
+
+	meta, err := metainfo.Load(torrentPath)
+	if err != nil {
+		t.Fatalf("metainfo.Load: %v", err)
+	}
+	wantBlocks := 0
+	for i := 0; i < meta.PieceCount(); i++ {
+		wantBlocks += int((meta.PieceSize(i) + wire.BlockSize - 1) / wire.BlockSize)
+	}
+
+	// A per-block delay keeps requests outstanding on both connections, so a
+	// client that used one seeder at a time would show two disjoint windows.
+	const serveDelay = 15 * time.Millisecond
+	seederA := startRecorded(t, seedBin, "-serve-delay", serveDelay.String(), torrentPath, srcPath)
+	seederB := startRecorded(t, seedBin, "-serve-delay", serveDelay.String(), torrentPath, srcPath)
+	seederA.waitFor(t, "seed: ready", 20*time.Second)
+	seederB.waitFor(t, "seed: ready", 20*time.Second)
+
+	outPath := filepath.Join(t.TempDir(), "downloaded.bin")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	client := exec.CommandContext(ctx, clientBin, torrentPath, outPath)
+	var stdout, stderr bytes.Buffer
+	client.Stdout = &stdout
+	client.Stderr = &stderr
+	if err := client.Run(); err != nil {
+		t.Fatalf("client failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	t.Logf("client stderr:\n%s", stderr.String())
+
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("downloaded file differs: got %d bytes (sha256 %x), want %d bytes (sha256 %x)",
+			len(got), sha256.Sum256(got), len(payload), sha256.Sum256(payload))
+	}
+
+	// 1. Both seeders served part of the download.
+	aServed := seederA.parseServed(t)
+	bServed := seederB.parseServed(t)
+	if len(aServed) == 0 || len(bServed) == 0 {
+		t.Fatalf("both seeders must serve blocks: A served %d, B served %d", len(aServed), len(bServed))
+	}
+	t.Logf("seeder A served %d blocks, seeder B served %d blocks", len(aServed), len(bServed))
+
+	// 2. No block was fetched twice, and the swarm covered every block.
+	counts := make(map[[2]uint32]int)
+	for _, b := range append(append([]servedBlock{}, aServed...), bServed...) {
+		counts[b.key]++
+	}
+	if len(counts) != wantBlocks {
+		t.Fatalf("the swarm served %d distinct blocks, want %d", len(counts), wantBlocks)
+	}
+	for key, n := range counts {
+		if n != 1 {
+			t.Fatalf("block piece=%d begin=%d was served %d times", key[0], key[1], n)
+		}
+	}
+
+	// 3. The serving windows overlap, i.e. both seeders were busy at once.
+	aFirst, aLast := seederA.span(t, "seed: served")
+	bFirst, bLast := seederB.span(t, "seed: served")
+	overlapStart := aFirst
+	if bFirst.After(overlapStart) {
+		overlapStart = bFirst
+	}
+	overlapEnd := aLast
+	if bLast.Before(overlapEnd) {
+		overlapEnd = bLast
+	}
+	if overlapStart.After(overlapEnd) {
+		t.Fatalf("seeding windows did not overlap: A %s..%s, B %s..%s",
+			aFirst.Format(time.StampMilli), aLast.Format(time.StampMilli),
+			bFirst.Format(time.StampMilli), bLast.Format(time.StampMilli))
+	}
+	t.Logf("serving windows overlap for %s", overlapEnd.Sub(overlapStart))
+
+	// 4. The client's own statistics agree that more than one peer worked at
+	// the same time.
+	if used := grepInt(t, stderr.String(), "peers used"); used < 2 {
+		t.Fatalf("client reported %d peer(s) used, want at least 2", used)
+	}
+	if peak := grepInt(t, stderr.String(), "max active peers"); peak < 2 {
+		t.Fatalf("client reported %d peer(s) active at peak, want at least 2", peak)
+	}
+}
+
+// servedBlock is one block a seeder answered.
+type servedBlock struct {
+	key [2]uint32 // piece, begin
+}
+
+type stampedLine struct {
+	at   time.Time
+	text string
+}
+
+// lineLog keeps a timestamped copy of a helper process's stdout, so the test
+// can reason about when the process was doing work.
+type lineLog struct {
+	mu    sync.Mutex
+	lines []stampedLine
+}
+
+func (l *lineLog) add(text string) {
+	l.mu.Lock()
+	l.lines = append(l.lines, stampedLine{at: time.Now(), text: text})
+	l.mu.Unlock()
+}
+
+func (l *lineLog) snapshot() []stampedLine {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]stampedLine(nil), l.lines...)
+}
+
+// recordedProcess is startProcess plus a drain that timestamps every line.
+// Use its waitFor/span rather than waitForLine: the drain consumes the channel.
+type recordedProcess struct {
+	*process
+	log *lineLog
+}
+
+func startRecorded(t *testing.T, name string, args ...string) *recordedProcess {
+	t.Helper()
+	p := startProcess(t, name, args...)
+	rp := &recordedProcess{process: p, log: &lineLog{}}
+	go func() {
+		for line := range p.lines {
+			rp.log.add(line)
+		}
+	}()
+	return rp
+}
+
+func (r *recordedProcess) waitFor(t *testing.T, substr string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, l := range r.log.snapshot() {
+			if strings.Contains(l.text, substr) {
+				return l.text
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %q from %s", timeout, substr, r.cmd.Path)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (r *recordedProcess) parseServed(t *testing.T) []servedBlock {
+	t.Helper()
+	var out []servedBlock
+	for _, l := range r.log.snapshot() {
+		if !strings.HasPrefix(l.text, "seed: served ") {
+			continue
+		}
+		var piece int
+		var begin, length uint32
+		if _, err := fmt.Sscanf(l.text, "seed: served piece=%d begin=%d length=%d", &piece, &begin, &length); err != nil {
+			t.Fatalf("parse %q: %v", l.text, err)
+		}
+		if length == 0 || length > wire.BlockSize {
+			t.Fatalf("%s served a %d byte block", r.cmd.Path, length)
+		}
+		out = append(out, servedBlock{key: [2]uint32{uint32(piece), begin}})
+	}
+	return out
+}
+
+// span returns the first and last time a line matching substr was seen.
+func (r *recordedProcess) span(t *testing.T, substr string) (time.Time, time.Time) {
+	t.Helper()
+	var first, last time.Time
+	for _, l := range r.log.snapshot() {
+		if !strings.Contains(l.text, substr) {
+			continue
+		}
+		if first.IsZero() {
+			first = l.at
+		}
+		last = l.at
+	}
+	if first.IsZero() {
+		t.Fatalf("no line matching %q from %s", substr, r.cmd.Path)
+	}
+	return first, last
+}
+
+// grepInt reads the first decimal number that follows label in text.
+func grepInt(t *testing.T, text, label string) int {
+	t.Helper()
+	i := strings.Index(text, label)
+	if i < 0 {
+		t.Fatalf("%q not found in the client's output:\n%s", label, text)
+	}
+	rest := strings.TrimLeft(text[i+len(label):], " :=,")
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		t.Fatalf("no number after %q", label)
+	}
+	n, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		t.Fatalf("parse %q: %v", label, err)
+	}
+	return n
 }

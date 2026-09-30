@@ -54,12 +54,60 @@ func TestBlockRangesAreContiguous(t *testing.T) {
 	}
 }
 
-func TestFindBlock(t *testing.T) {
-	blocks := blockRanges(2 * wire.BlockSize)
-	if got := findBlock(blocks, wire.BlockSize); got == nil || got.begin != wire.BlockSize {
-		t.Fatalf("findBlock(%d) = %+v", wire.BlockSize, got)
+func TestPieceBlockLookup(t *testing.T) {
+	ps := newPiece(0, 2*wire.BlockSize+7)
+	if got := ps.blockAt(wire.BlockSize); got != 1 {
+		t.Fatalf("blockAt(%d) = %d, want 1", wire.BlockSize, got)
 	}
-	if got := findBlock(blocks, 5); got != nil {
-		t.Fatalf("findBlock(5) = %+v, want nil", got)
+	if got := ps.blockAt(5); got != -1 {
+		t.Fatalf("blockAt(5) = %d, want -1", got)
+	}
+	if got := ps.blockAt(2 * wire.BlockSize); got != 2 {
+		t.Fatalf("blockAt(%d) = %d, want the short tail block", 2*wire.BlockSize, got)
+	}
+	if got := ps.blockAt(3 * wire.BlockSize); got != -1 {
+		t.Fatalf("blockAt(%d) = %d, want -1 past the end", 3*wire.BlockSize, got)
+	}
+}
+
+// A piece is only "missing" a block nobody holds and nobody was asked for, so
+// the scheduler cannot hand the same block to two peers.
+func TestPieceNextMissing(t *testing.T) {
+	ps := newPiece(0, 3*wire.BlockSize)
+	if got := ps.nextMissing(); got != 0 {
+		t.Fatalf("nextMissing() = %d, want 0", got)
+	}
+	owner := &peerState{piece: 0}
+	ps.blocks[0].received = true
+	ps.blocks[1].inflight = owner
+	if got := ps.nextMissing(); got != 2 {
+		t.Fatalf("nextMissing() = %d, want 2", got)
+	}
+	ps.blocks[2].received = true
+	if got := ps.nextMissing(); got != -1 {
+		t.Fatalf("nextMissing() = %d, want -1 when nothing is askable", got)
+	}
+}
+
+func TestPieceResetClearsInflightAccounting(t *testing.T) {
+	ps := newPiece(0, 2*wire.BlockSize)
+	owner := &peerState{piece: 0, inflight: 1}
+	ps.blocks[0].received = true
+	ps.blocks[1].inflight = owner
+	ps.received = 1
+	ps.buf = make([]byte, ps.size)
+
+	ps.reset()
+
+	if ps.received != 0 || ps.buf != nil || ps.owner != nil {
+		t.Fatalf("reset left received=%d buf=%v owner=%v", ps.received, ps.buf, ps.owner)
+	}
+	if owner.inflight != 0 {
+		t.Fatalf("reset left the owner with %d in flight, want 0", owner.inflight)
+	}
+	for i := range ps.blocks {
+		if ps.blocks[i].received || ps.blocks[i].inflight != nil {
+			t.Fatalf("block %d survived reset: %+v", i, ps.blocks[i])
+		}
 	}
 }

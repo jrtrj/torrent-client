@@ -42,6 +42,9 @@ Flags:
         TCP port to listen on; 0 picks a free one (default 0)
   -listen string
         interface to bind (default 127.0.0.1)
+  -serve-delay duration
+        sleep before answering each block request (e.g. 15ms); used by the
+        swarm tests to widen the serving window of each seeder
 `
 
 func main() {
@@ -51,6 +54,7 @@ func main() {
 	trackerURL := fs.String("tracker", "", "announce URL")
 	port := fs.Int("port", 0, "TCP port to listen on")
 	listen := fs.String("listen", "127.0.0.1", "interface to bind")
+	serveDelay := fs.Duration("serve-delay", 0, "sleep before answering each block request")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -59,13 +63,13 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := run(fs.Arg(0), fs.Arg(1), *trackerURL, *listen, *port); err != nil {
+	if err := run(fs.Arg(0), fs.Arg(1), *trackerURL, *listen, *port, *serveDelay); err != nil {
 		fmt.Fprintf(os.Stderr, "seed: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(torrentPath, dataPath, trackerURL, listen string, port int) error {
+func run(torrentPath, dataPath, trackerURL, listen string, port int, serveDelay time.Duration) error {
 	meta, err := metainfo.Load(torrentPath)
 	if err != nil {
 		return err
@@ -129,7 +133,7 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int) error {
 	go reannounce(ctx, tr, meta, peerID, uint16(boundPort), interval)
 
 	fmt.Println("seed: ready")
-	if err := serve(ctx, ln, meta, store, peerID); err != nil {
+	if err := serve(ctx, ln, meta, store, peerID, serveDelay); err != nil {
 		return err
 	}
 
@@ -144,7 +148,7 @@ func run(torrentPath, dataPath, trackerURL, listen string, port int) error {
 	return nil
 }
 
-func serve(ctx context.Context, ln net.Listener, meta *metainfo.MetaInfo, store *storage.Storage, peerID [20]byte) error {
+func serve(ctx context.Context, ln net.Listener, meta *metainfo.MetaInfo, store *storage.Storage, peerID [20]byte, serveDelay time.Duration) error {
 	all := wire.BitfieldComplete(meta.PieceCount())
 	for {
 		conn, err := ln.Accept()
@@ -155,11 +159,11 @@ func serve(ctx context.Context, ln net.Listener, meta *metainfo.MetaInfo, store 
 			}
 			return err
 		}
-		go serveConn(conn, meta, store, peerID, all)
+		go serveConn(conn, meta, store, peerID, all, serveDelay)
 	}
 }
 
-func serveConn(conn net.Conn, meta *metainfo.MetaInfo, store *storage.Storage, peerID [20]byte, all []byte) {
+func serveConn(conn net.Conn, meta *metainfo.MetaInfo, store *storage.Storage, peerID [20]byte, all []byte, serveDelay time.Duration) {
 	defer conn.Close()
 
 	if err := conn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
@@ -200,6 +204,9 @@ func serveConn(conn net.Conn, meta *metainfo.MetaInfo, store *storage.Storage, p
 		case wire.IDNotInterested:
 			interested = false
 		case wire.IDRequest:
+			if serveDelay > 0 {
+				time.Sleep(serveDelay)
+			}
 			if err := serveRequest(conn, meta, store, m); err != nil {
 				return
 			}
@@ -225,7 +232,13 @@ func serveRequest(conn net.Conn, meta *metainfo.MetaInfo, store *storage.Storage
 	if err != nil {
 		return err
 	}
-	return wire.Write(conn, wire.Message{ID: wire.IDPiece, Index: m.Index, Begin: m.Begin, Block: data})
+	if err := wire.Write(conn, wire.Message{ID: wire.IDPiece, Index: m.Index, Begin: m.Begin, Block: data}); err != nil {
+		return err
+	}
+	// Logged on purpose: the swarm tests read these lines to prove which
+	// seeder carried which block, and when.
+	fmt.Printf("seed: served piece=%d begin=%d length=%d\n", m.Index, m.Begin, len(data))
+	return nil
 }
 
 func reannounce(ctx context.Context, tr *tracker.HTTPTracker, meta *metainfo.MetaInfo, peerID [20]byte, port uint16, interval time.Duration) {
