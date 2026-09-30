@@ -54,8 +54,8 @@ type AnnounceResponse struct {
 	Peers       []Peer
 }
 
-// Tracker is a swarm source. HTTP is the first transport; a UDP transport
-// (BEP 15) plugs in behind the same interface without the engine changing.
+// Tracker is a swarm source. HTTP and the BEP 15 UDP protocol are the two
+// transports behind it; New picks between them by the announce URL's scheme.
 type Tracker interface {
 	Announce(ctx context.Context, req AnnounceRequest) (AnnounceResponse, error)
 }

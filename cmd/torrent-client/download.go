@@ -168,13 +168,21 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	// give up while another one knows the swarm.
 	var lastErr error
 	for _, announceURL := range trackers {
+		// The URL scheme picks the wire protocol (http/https or udp); the
+		// engine only ever sees the tracker.Tracker interface.
+		tr, err := tracker.New(announceURL)
+		if err != nil {
+			logf("tracker %s is unusable: %v", announceURL, err)
+			lastErr = err
+			continue
+		}
 		eng := engine.New(engine.Config{
 			Meta:     meta,
 			PeerID:   peerID,
 			Port:     uint16(cfg.port),
 			Output:   output,
 			Store:    store,
-			Tracker:  tracker.NewHTTP(announceURL),
+			Tracker:  tr,
 			Log:      logf,
 			Uploaded: uploaded,
 			Seed:     cfg.seed,
@@ -186,15 +194,21 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		// Point the sticky line at this engine's counters for as long as it
 		// runs; a retry with the next tracker replaces the source.
 		dash.Track(eng.Stats)
-		if err := eng.Run(ctx); err != nil {
+		runErr := eng.Run(ctx)
+		// The engine has stopped announcing, so release the tracker's socket
+		// before moving on to the next URL.
+		if closer, ok := tr.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if runErr != nil {
 			if ctx.Err() != nil {
 				// Ctrl-C during the download: a clean stop, not a failure.
 				// The state flushed above is enough to resume next time.
 				dash.Eventf("torrent-client: interrupted; resume state saved for %s", output)
 				return exitOK
 			}
-			logf("tracker %s failed: %v", announceURL, err)
-			lastErr = err
+			logf("tracker %s failed: %v", announceURL, runErr)
+			lastErr = runErr
 			continue
 		}
 		lastErr = nil
