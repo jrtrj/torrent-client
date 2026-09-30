@@ -57,6 +57,7 @@ package seed
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -65,6 +66,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"torrent-client/internal/bencode"
 	"torrent-client/internal/metainfo"
 	"torrent-client/internal/ratelimit"
 	"torrent-client/internal/wire"
@@ -408,12 +410,134 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 				s.logf("dropped inbound peer %s: %v", nc.RemoteAddr(), err)
 				return
 			}
+		case wire.IDExtended:
+			if err := s.serveExtension(c, m); err != nil {
+				if ctx.Err() != nil || s.isClosed() {
+					return
+				}
+				s.logf("dropped inbound peer %s: %v", nc.RemoteAddr(), err)
+				return
+			}
 		default:
 			// Keep-alives, choke/unchoke/have/bitfield/cancel from the peer,
 			// and extension ids we do not implement do not change what we
 			// serve.
 		}
 	}
+}
+
+// ut_metadata (BEP 9) ids for the metadata we serve. Id 0 is reserved for the
+// extension handshake itself, so ut_metadata takes the id we advertise.
+const (
+	extensionHandshakeID = 0
+	ourUTMetadataID      = 1
+	metadataPieceSize    = 16 * 1024
+)
+
+// ut_metadata message types.
+const (
+	msgRequest = 0
+	msgData    = 1
+	msgReject  = 2
+)
+
+type extensionHandshake struct {
+	M            map[string]int `bencode:"m"`
+	MetadataSize int64          `bencode:"metadata_size"`
+	V            string         `bencode:"v"`
+}
+
+type metadataMessage struct {
+	MsgType   int `bencode:"msg_type"`
+	Piece     int `bencode:"piece"`
+	TotalSize int `bencode:"total_size"`
+}
+
+// sendExtensionHandshake announces that we can serve the metadata, and how big
+// it is. Serving it is what makes this client a good swarm citizen: a peer
+// arriving from a magnet link would otherwise take metadata from the swarm and
+// never give any back.
+//
+// We answer this rather than volunteering it. Our own client always opens with
+// it, as real clients do, so a peer that wants metadata asks first; sending one
+// unprompted on every connection would change the frame sequence every other
+// peer has to tolerate for no gain.
+func (s *Server) sendExtensionHandshake(c *inbound) error {
+	var buf bytes.Buffer
+	err := bencode.Marshal(&buf, extensionHandshake{
+		M:            map[string]int{"ut_metadata": ourUTMetadataID},
+		MetadataSize: int64(len(s.meta.RawInfo)),
+		V:            "torrent-client 0.1",
+	})
+	if err != nil {
+		return err
+	}
+	return c.write(wire.Message{
+		ID:       wire.IDExtended,
+		Extended: append([]byte{extensionHandshakeID}, buf.Bytes()...),
+	})
+}
+
+// serveExtension answers the extension protocol (BEP 10). Only the handshake
+// and ut_metadata requests are acted on; anything else is ignored, as the BEP
+// requires, so an extension we do not know cannot cost a peer its connection.
+func (s *Server) serveExtension(c *inbound, m wire.Message) error {
+	if len(m.Extended) == 0 {
+		return nil
+	}
+	extID, body := m.Extended[0], m.Extended[1:]
+	switch extID {
+	case extensionHandshakeID:
+		return s.sendExtensionHandshake(c)
+	case ourUTMetadataID:
+		return s.serveMetadataRequest(c, body)
+	default:
+		return nil
+	}
+}
+
+// serveMetadataRequest answers one ut_metadata request. A request for a piece
+// past the end is refused with the protocol's own reject message rather than
+// dropped: a peer asking for the wrong piece is confused, not hostile. There is
+// no lookup here because a Server holds the metadata of exactly one torrent —
+// the swarm gate at the handshake already decided that.
+func (s *Server) serveMetadataRequest(c *inbound, body []byte) error {
+	var msg metadataMessage
+	if err := bencode.Unmarshal(bytes.NewReader(body), &msg); err != nil {
+		// A malformed request is not worth dropping the peer over.
+		return nil
+	}
+	if msg.MsgType != msgRequest {
+		return nil
+	}
+
+	info := s.meta.RawInfo
+	start := msg.Piece * metadataPieceSize
+	if len(info) == 0 || msg.Piece < 0 || start >= len(info) {
+		return c.writeMetadata(metadataMessage{MsgType: msgReject, Piece: msg.Piece}, nil)
+	}
+	end := start + metadataPieceSize
+	if end > len(info) {
+		end = len(info)
+	}
+	return c.writeMetadata(metadataMessage{
+		MsgType:   msgData,
+		Piece:     msg.Piece,
+		TotalSize: len(info),
+	}, info[start:end])
+}
+
+// writeMetadata sends a ut_metadata message. A data message is a bencoded
+// dictionary immediately followed by the raw piece, so the payload is assembled
+// here rather than encoded from a single struct.
+func (c *inbound) writeMetadata(msg metadataMessage, data []byte) error {
+	var buf bytes.Buffer
+	if err := bencode.Marshal(&buf, msg); err != nil {
+		return err
+	}
+	payload := append([]byte{ourUTMetadataID}, buf.Bytes()...)
+	payload = append(payload, data...)
+	return c.write(wire.Message{ID: wire.IDExtended, Extended: payload})
 }
 
 // serveRequest answers one request, or refuses it. A request for a piece we do

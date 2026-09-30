@@ -25,8 +25,8 @@ func TestHandshakeEncodingIsExactly68Bytes(t *testing.T) {
 	if enc[0] != 19 || string(enc[1:20]) != Protocol {
 		t.Fatalf("pstrlen/pstr = %d/%q", enc[0], enc[1:20])
 	}
-	if !bytes.Equal(enc[20:28], make([]byte, 8)) {
-		t.Fatalf("reserved bytes = %x, want zeroes", enc[20:28])
+	if got := enc[20:28]; !bytes.Equal(got, []byte{0, 0, 0, 0, 0, ExtensionProtocolBit, 0, 0}) {
+		t.Fatalf("reserved bytes = %x, want only the extension protocol bit set", got)
 	}
 }
 
@@ -40,8 +40,11 @@ func TestReadHandshakeRoundTrip(t *testing.T) {
 	if got.InfoHash != infoHash || got.PeerID != peerID {
 		t.Fatalf("handshake = %+v, want info-hash %x peer id %x", got, infoHash, peerID)
 	}
-	if got.Reserved != [8]byte{} {
-		t.Fatalf("reserved = %x, want zeroes", got.Reserved)
+	if want := [8]byte{0, 0, 0, 0, 0, ExtensionProtocolBit, 0, 0}; got.Reserved != want {
+		t.Fatalf("reserved = %x, want %x (only the extension protocol bit)", got.Reserved, want)
+	}
+	if !got.SupportsExtensions() {
+		t.Fatal("the peer's extension-protocol bit was not seen")
 	}
 }
 

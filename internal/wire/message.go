@@ -17,6 +17,9 @@ const (
 	IDRequest       byte = 6
 	IDPiece         byte = 7
 	IDCancel        byte = 8
+	// IDExtended is the extension protocol (BEP 10). Its payload is a one-byte
+	// extension message id followed by that extension's own body.
+	IDExtended byte = 20
 )
 
 // IDKeepAlive is not a wire id: a zero length prefix carries no id byte at
@@ -39,6 +42,11 @@ type Message struct {
 	Length   uint32
 	Block    []byte
 	Bitfield []byte
+	// Extended is the payload of an IDExtended message: a one-byte extension
+	// message id, then that extension's body. For a ut_metadata data message
+	// the body is a bencoded dictionary immediately followed by the raw
+	// metadata bytes, which is why it is kept as one opaque slice here.
+	Extended []byte
 }
 
 // Encode renders the full frame, length prefix included.
@@ -60,6 +68,11 @@ func (m Message) Encode() ([]byte, error) {
 	case IDPiece:
 		payload = append(be32(m.Index), be32(m.Begin)...)
 		payload = append(payload, m.Block...)
+	case IDExtended:
+		if len(m.Extended) == 0 {
+			return nil, fmt.Errorf("wire: extended message has no body")
+		}
+		payload = m.Extended
 	default:
 		return nil, fmt.Errorf("wire: cannot encode unknown message id %d", m.ID)
 	}
@@ -123,6 +136,11 @@ func Decode(r io.Reader) (Message, error) {
 		m.Index = binary.BigEndian.Uint32(payload[0:4])
 		m.Begin = binary.BigEndian.Uint32(payload[4:8])
 		m.Block = append([]byte(nil), payload[8:]...)
+	case IDExtended:
+		if len(payload) == 0 {
+			return Message{}, fmt.Errorf("wire: extended message has no body")
+		}
+		m.Extended = append([]byte(nil), payload...)
 	default:
 		// Unknown id: keep it decodable so the caller can skip it.
 	}

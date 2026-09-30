@@ -45,6 +45,11 @@ type MetaInfo struct {
 	AnnounceList [][]string
 	Info         Info
 	InfoHash     [HashSize]byte
+	// RawInfo is the info dictionary exactly as it arrived. It is kept because
+	// peers verify metadata against the info-hash, which is the hash of these
+	// exact bytes: re-encoding the parsed fields could reorder keys and produce
+	// a different hash, and we would then be serving metadata nobody can trust.
+	RawInfo []byte
 }
 
 // Multifile reports whether the torrent describes a set of files.
@@ -142,6 +147,36 @@ func Parse(r io.Reader) (*MetaInfo, error) {
 		return nil, errors.New("metainfo: missing info dictionary")
 	}
 
+	return parseInfo(raw.Info, raw.Announce, raw.AnnounceList)
+}
+
+// ParseInfoBytes builds a MetaInfo from an info dictionary fetched from the
+// swarm. A magnet link supplies the trackers, because the info dictionary of a
+// magnet-only torrent usually carries none of its own. The caller must have
+// already checked that these exact bytes hash to the info-hash the magnet
+// asked for — that hash is the only reason to trust them.
+func ParseInfoBytes(infoBytes []byte, trackers []string) (*MetaInfo, error) {
+	if len(infoBytes) == 0 {
+		return nil, errors.New("metainfo: empty info dictionary")
+	}
+	announce := ""
+	if len(trackers) > 0 {
+		announce = trackers[0]
+	}
+	var announceList [][]string
+	for _, tr := range trackers {
+		announceList = append(announceList, []string{tr})
+	}
+	return parseInfo(infoBytes, announce, announceList)
+}
+
+// parseInfo builds a MetaInfo from the raw info dictionary plus whatever
+// tracker information arrived alongside it.
+func parseInfo(rawInfo []byte, announce string, announceList [][]string) (*MetaInfo, error) {
+	if len(rawInfo) == 0 {
+		return nil, errors.New("metainfo: missing info dictionary")
+	}
+
 	// `pieces` is binary, and the codec does not assign bencode strings into
 	// []byte fields, so it is read as a string and converted.
 	var info struct {
@@ -154,12 +189,13 @@ func Parse(r io.Reader) (*MetaInfo, error) {
 			Path   []string `bencode:"path"`
 		} `bencode:"files"`
 	}
-	if err := bencode.Unmarshal(bytes.NewReader(raw.Info), &info); err != nil {
+	if err := bencode.Unmarshal(bytes.NewReader(rawInfo), &info); err != nil {
 		return nil, fmt.Errorf("parse info dictionary: %w", err)
 	}
 
-	m := &MetaInfo{Announce: raw.Announce, AnnounceList: raw.AnnounceList}
-	m.InfoHash = sha1.Sum(raw.Info)
+	m := &MetaInfo{Announce: announce, AnnounceList: announceList}
+	m.InfoHash = sha1.Sum(rawInfo)
+	m.RawInfo = append([]byte(nil), rawInfo...)
 	m.Info = Info{
 		Name:        info.Name,
 		PieceLength: info.PieceLength,

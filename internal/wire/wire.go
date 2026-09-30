@@ -21,6 +21,10 @@ const (
 	// is a 16 KiB block plus 9 bytes of framing, so this only ever rejects
 	// garbage (a bitfield for a torrent with millions of pieces still fits).
 	MaxMessageLength = 4 << 20
+
+	// ExtensionProtocolBit is the reserved-byte flag advertising the extension
+	// protocol (BEP 10), which lives in the sixth reserved byte.
+	ExtensionProtocolBit = 0x10
 )
 
 var (
@@ -37,11 +41,21 @@ type Handshake struct {
 	PeerID   [20]byte
 }
 
-// NewHandshake builds our outbound handshake. The reserved bytes stay zero:
-// DHT and the extension protocol (BEP 5/9/10) are downstream features, so
-// advertising them now would invite messages we cannot answer.
+// NewHandshake builds our outbound handshake, advertising the extension
+// protocol. That bit used to stay clear because we could not answer an
+// extension handshake; now that ut_metadata is implemented it is set honestly.
+// The DHT bit stays clear: DHT is still out of scope, so advertising it would
+// invite messages we cannot answer.
 func NewHandshake(infoHash, peerID [20]byte) Handshake {
-	return Handshake{InfoHash: infoHash, PeerID: peerID}
+	h := Handshake{InfoHash: infoHash, PeerID: peerID}
+	h.Reserved[5] |= ExtensionProtocolBit
+	return h
+}
+
+// SupportsExtensions reports whether the peer advertised the extension
+// protocol (BEP 10).
+func (h Handshake) SupportsExtensions() bool {
+	return h.Reserved[5]&ExtensionProtocolBit != 0
 }
 
 // Encode renders the handshake as its 68 bytes.

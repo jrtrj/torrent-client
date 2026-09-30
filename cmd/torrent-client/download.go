@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,9 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"torrent-client/internal/content"
 	"torrent-client/internal/engine"
+	"torrent-client/internal/magnet"
+	"torrent-client/internal/metadata"
 	"torrent-client/internal/metainfo"
 	"torrent-client/internal/ratelimit"
 	"torrent-client/internal/seed"
@@ -76,26 +80,35 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 		dash.Eventf("torrent-client: %v", err)
 		return exitFatal
 	}
-
-	// Magnet links reach the same pipeline later (metadata first, then this
-	// path); until then they are a clear fatal error rather than a confusing
-	// "no such file".
-	if strings.HasPrefix(cfg.source, "magnet:") {
-		return fail(fmt.Errorf("magnet links are not implemented yet"))
+	logf := func(format string, args ...any) {
+		dash.Eventf("torrent-client: "+format, args...)
 	}
 
-	meta, err := metainfo.Load(cfg.source)
+	// Ctrl-C cancels cleanly; the pieces already written stay on disk and the
+	// resume sidecar keeps them for the next run.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	peerID, err := newPeerID()
+	if err != nil {
+		return fail(fmt.Errorf("generate peer id: %w", err))
+	}
+
+	// A magnet link carries only an info-hash, so the metadata is fetched from
+	// the swarm first. From there both sources describe the same torrent and
+	// nothing below this point cares which one it came from.
+	var meta *metainfo.MetaInfo
+	if strings.HasPrefix(cfg.source, "magnet:") {
+		meta, err = resolveMagnet(ctx, cfg.source, peerID, uint16(cfg.port), logf)
+	} else {
+		meta, err = metainfo.Load(cfg.source)
+	}
 	if err != nil {
 		return fail(err)
 	}
 	trackers := meta.Trackers()
 	if len(trackers) == 0 {
 		return fail(fmt.Errorf("the torrent has no tracker to announce to"))
-	}
-
-	peerID, err := newPeerID()
-	if err != nil {
-		return fail(fmt.Errorf("generate peer id: %w", err))
 	}
 
 	// Where the content lands, and the store that speaks that layout. Both come
@@ -116,18 +129,10 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	// never adopted. It lives beside the output as "<output>.resume".
 	resume := state.Open(output, meta.InfoHash, meta.Info.PieceLength, meta.TotalLength(), meta.PieceCount())
 
-	// Ctrl-C cancels cleanly; the pieces already written stay on disk and the
-	// resume sidecar keeps them for the next run.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-
 	// The redraw loop runs for the whole download; on a non-terminal stream it
-	// returns immediately and the logf below stays a plain line writer.
+	// returns immediately and the logf above stays a plain line writer.
 	go dash.Run(ctx)
 
-	logf := func(format string, args ...any) {
-		dash.Eventf("torrent-client: "+format, args...)
-	}
 	logf("downloading %q (%d pieces, %d bytes) to %s",
 		meta.Info.Name, meta.PieceCount(), meta.TotalLength(), output)
 	if cfg.maxDownRate > 0 {
@@ -253,6 +258,84 @@ func execute(cfg config, stdout, stderr io.Writer) int {
 	}
 	dash.Eventf("torrent-client: download complete: %s", output)
 	return exitOK
+}
+
+// magnetTimeout bounds resolving a magnet: finding peers and pulling the
+// metadata is a negotiation, not the download itself, so it must not hang for
+// as long as a transfer legitimately could.
+const magnetTimeout = 90 * time.Second
+
+// resolveMagnet turns a magnet link into metainfo. The link carries only an
+// info-hash, so we announce to one of its trackers to find peers, pull the info
+// dictionary from them over ut_metadata, and then check it against the hash the
+// link asked for. That check is what makes this safe: the hash is the only
+// reason to trust bytes a stranger sent, and it is what stops a hostile peer
+// from feeding us a different torrent under the name we asked for.
+func resolveMagnet(ctx context.Context, uri string, peerID [20]byte, port uint16, logf func(string, ...any)) (*metainfo.MetaInfo, error) {
+	m, err := magnet.Parse(uri)
+	if err != nil {
+		return nil, err
+	}
+	logf("resolving magnet %x", m.InfoHash)
+
+	ctx, cancel := context.WithTimeout(ctx, magnetTimeout)
+	defer cancel()
+
+	var lastErr error
+	for _, announceURL := range m.Trackers {
+		tr, err := tracker.New(announceURL)
+		if err != nil {
+			logf("tracker %s is unusable: %v", announceURL, err)
+			lastErr = err
+			continue
+		}
+		resp, err := tracker.AnnounceWithRetry(ctx, tr, tracker.AnnounceRequest{
+			InfoHash: m.InfoHash,
+			PeerID:   peerID,
+			Port:     port,
+			// We do not know the size yet, but a non-zero Left is what stops a
+			// tracker from counting us as a seeder. The engine reports the real
+			// figures once it takes this swarm over.
+			Left:    1,
+			Event:   tracker.EventStarted,
+			NumWant: 50,
+		}, tracker.DefaultRetry)
+		if closer, ok := tr.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if err != nil {
+			logf("tracker %s had nothing for this info-hash: %v", announceURL, err)
+			lastErr = err
+			continue
+		}
+
+		addrs := make([]string, 0, len(resp.Peers))
+		for _, p := range resp.Peers {
+			addrs = append(addrs, p.Addr())
+		}
+		logf("%d peers offered metadata for %x", len(addrs), m.InfoHash)
+
+		info, err := metadata.Fetch(ctx, m.InfoHash, peerID, addrs)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		meta, err := metainfo.ParseInfoBytes(info, m.Trackers)
+		if err != nil {
+			return nil, err
+		}
+		if meta.InfoHash != m.InfoHash {
+			return nil, fmt.Errorf("metainfo: the fetched info-hash %x is not the magnet's %x", meta.InfoHash, m.InfoHash)
+		}
+		logf("metadata: %q, %d pieces, %d bytes", meta.Info.Name, meta.PieceCount(), meta.TotalLength())
+		return meta, nil
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("the magnet names no usable tracker")
+	}
+	return nil, fmt.Errorf("magnet: %w", lastErr)
 }
 
 // newPeerID builds an Azureus-style id: a client tag plus random bytes.
