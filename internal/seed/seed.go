@@ -1,58 +1,19 @@
-// Package seed serves verified pieces back to the swarm over the peer wire
-// protocol. It is the one upload implementation: cmd/seed (the test fixture)
-// and the real client both drive it, so the serving rules live in a single
-// place.
+// Package seed serves verified pieces back to the swarm. cmd/seed and the real
+// client both drive it, so the serving rules live in one place.
 //
-// Scope is serving, not a general-purpose server. There is no tit-for-tat
-// scoring and no rarest-first piece picking; the server answers requests for
-// exactly the pieces its Source reports as held.
+// One torrent per Server: the handshake is checked against that info-hash and
+// anything else is dropped without a reply. We serve whatever the Source says is
+// held, so a peer that finds us mid-download gets the pieces verified so far.
 //
-// Rate limit: an optional token bucket (ratelimit.Limiter) caps how fast the
-// server puts bytes on the wire. It is consulted before a reply is read from
-// disk and written, so a capped server holds no buffer and touches no disk for
-// a block it is not about to send. The wait is per connection and the request
-// loop is serial, so the extra requests of a peer that runs ahead of the cap
-// queue in that peer's own socket buffer (TCP backpressure) rather than in
-// ours; the bucket itself orders waiters by arrival, so no one peer can hold
-// the whole allowance. A nil Limiter — or one with a zero rate — is unlimited.
+// uploadSlots peers are unchoked at once and hold their slot until they lose
+// interest or disconnect. No tit-for-tat, no rotation - it bounds state, it is
+// not a fairness claim. Someone who arrives with every slot taken stays choked
+// for the session.
 //
-// Swarm gate: a Server is built for exactly one torrent, so the handshake is
-// checked against that info-hash and nothing else — a per-torrent allow-list,
-// not "any torrent we happen to hold". A peer whose handshake names a different
-// torrent (or does not speak the protocol) is dropped without a reply. Whether
-// we hold the torrent completely is enforced per piece instead: a peer that
-// reaches us mid-download is served the pieces already verified, which is what
-// makes seeding during the download meaningful.
-//
-// Choke policy: a fixed set of uploadSlots peers may be unchoked at once. A
-// peer is unchoked when it becomes interested and a slot is free; the slot is
-// held until the peer loses interest or disconnects, and only unchoked peers'
-// requests are answered. The point is to bound state, not to be fair yet:
-// uploadSlots caps both how many peers we serve progressively and the transient
-// read buffers, and no peer is scored or rotated because the per-peer byte
-// accounting a tit-for-tat policy needs is not collected here. A peer that
-// arrives while every slot is taken stays choked for the session; slots are not
-// rotated, so it would have to reconnect and re-express interest once a slot
-// frees. That is a deliberate simplification, not a fairness claim.
-//
-// Memory: a request is answered by reading the requested span straight from
-// the content store at request time (storage.ReadBlock uses pread); no piece
-// is ever cached in memory, so a multi-gigabyte torrent costs no more RAM than
-// its block buffers. Because only unchoked peers are served and a connection
-// handles one request at a time, at most uploadSlots request buffers of at
-// most MaxRequestLength bytes are live at once, whatever the torrent size.
-//
-// Concurrency with the downloader: reads and writes go through pread/pwrite
-// (storage.ReadBlock/WritePiece), which share no file offset, so serving a
-// piece while another piece is written is safe at the OS level; and a Source
-// only reports a piece as held after its verified bytes have been written, so
-// the server never reads a piece that is still being assembled.
-//
-// Per-connection I/O: one goroutine reads requests and writes their replies;
-// a second, low-rate goroutine advertises pieces that become held after the
-// peer connected, so a peer that meets us mid-download still learns about
-// pieces as they verify. Every frame on a connection is written under one
-// mutex, so the two writers can never interleave a frame.
+// Blocks are read straight out of the store with pread at request time and never
+// cached, so RAM does not scale with torrent size, and serving a piece while
+// another is being written is safe at the OS level. An optional token bucket
+// caps upload; nil or zero means unlimited.
 package seed
 
 import (
@@ -87,10 +48,9 @@ const (
 	// writeTimeout bounds one frame write, so a peer that stops reading cannot
 	// pin a serving goroutine forever.
 	writeTimeout = 30 * time.Second
-	// haveInterval is how often a connection looks for pieces that became held
-	// after it connected. The download publishes completed pieces to the
-	// Source with no event this server can subscribe to, so the server polls;
-	// one pass over the piece count per connection per tick is negligible.
+	// How often a connection looks for pieces that became held after it
+	// connected. The downloader publishes completions with no event to subscribe
+	// to, so we poll.
 	haveInterval = 100 * time.Millisecond
 )
 
@@ -101,10 +61,8 @@ type Source interface {
 	// Have reports whether piece index is complete, hash-verified, and so
 	// safe to upload. It must be safe to call concurrently.
 	Have(index int) bool
-	// HaveBitfield returns a bitfield of every piece currently held, as one
-	// snapshot. The server takes it once per advertise tick rather than
-	// calling Have once per piece, which keeps a many-piece torrent cheap.
-	// The returned slice is owned by the caller and may be re-read freely.
+	// Everything held right now, as one snapshot. The advertise tick takes it
+	// once instead of calling Have per piece.
 	HaveBitfield() []byte
 	// ReadBlock returns length bytes at begin within piece index. The server
 	// has already checked that the span fits the piece.
@@ -145,10 +103,9 @@ type Server struct {
 	ln    net.Listener
 	slots chan struct{}
 
-	// closing is cancelled by Close. It is folded into the context the
-	// limiter sees, because a serving goroutine asleep in a bandwidth wait is
-	// not released by closing its socket and would hold Close open until its
-	// reservation came round.
+	// Cancelled by Close, and folded into the context the limiter sees: a
+	// goroutine asleep in a bandwidth wait does not notice its socket closing,
+	// and would hold Close open until its turn came round.
 	closing     context.Context
 	closeCancel context.CancelFunc
 
@@ -336,11 +293,10 @@ func (s *Server) serveConn(ctx context.Context, nc net.Conn) {
 	if _, err := nc.Write(wire.NewHandshake(s.meta.InfoHash, s.cfg.PeerID).Encode()); err != nil {
 		return
 	}
-	// Handshake validation is the swarm gate: the info-hash must be the one
-	// torrent this server was built for. Anything else is not our swarm and
-	// the connection is dropped without a reply. Whether we hold the torrent
-	// completely is enforced per piece below, not here, so a peer that
-	// reaches us mid-download can still fetch what is already verified.
+	// The swarm gate. Anything that is not this torrent's info-hash is dropped
+	// without a reply. How much of the torrent we actually hold is a per-piece
+	// question further down, not here - that is what lets a peer fetch from us
+	// mid-download.
 	if _, err := wire.ReadHandshake(nc, s.meta.InfoHash); err != nil {
 		s.logf("dropped inbound peer %s: %v", nc.RemoteAddr(), err)
 		return
@@ -453,15 +409,9 @@ type metadataMessage struct {
 	TotalSize int `bencode:"total_size"`
 }
 
-// sendExtensionHandshake announces that we can serve the metadata, and how big
-// it is. Serving it is what makes this client a good swarm citizen: a peer
-// arriving from a magnet link would otherwise take metadata from the swarm and
-// never give any back.
-//
-// We answer this rather than volunteering it. Our own client always opens with
-// it, as real clients do, so a peer that wants metadata asks first; sending one
-// unprompted on every connection would change the frame sequence every other
-// peer has to tolerate for no gain.
+// Tells peers we can serve the metadata and how big it is. We answer rather
+// than volunteer: every client opens with this anyway, and an unsolicited frame
+// just changes the sequence all the other peers have to tolerate.
 func (s *Server) sendExtensionHandshake(c *inbound) error {
 	var buf bytes.Buffer
 	err := bencode.Marshal(&buf, extensionHandshake{
@@ -496,11 +446,8 @@ func (s *Server) serveExtension(c *inbound, m wire.Message) error {
 	}
 }
 
-// serveMetadataRequest answers one ut_metadata request. A request for a piece
-// past the end is refused with the protocol's own reject message rather than
-// dropped: a peer asking for the wrong piece is confused, not hostile. There is
-// no lookup here because a Server holds the metadata of exactly one torrent —
-// the swarm gate at the handshake already decided that.
+// A request past the end gets the protocol's own reject rather than a dropped
+// connection. Asking for the wrong piece is confusion, not hostility.
 func (s *Server) serveMetadataRequest(c *inbound, body []byte) error {
 	var msg metadataMessage
 	if err := bencode.Unmarshal(bytes.NewReader(body), &msg); err != nil {
@@ -540,14 +487,12 @@ func (c *inbound) writeMetadata(msg metadataMessage, data []byte) error {
 	return c.write(wire.Message{ID: wire.IDExtended, Extended: payload})
 }
 
-// serveRequest answers one request, or refuses it. A request for a piece we do
-// not hold yet is ignored: peers race bitfields, and holding the connection
-// lets the peer fetch the piece once it verifies. Anything malformed is a
-// protocol violation and drops the connection without reading.
+// A request for a piece we do not hold yet is ignored, not refused: peers race
+// bitfields, and holding the connection lets them come back once it verifies.
+// Anything malformed is a protocol violation and drops the connection.
 //
-// The upload cap is enforced after the request has been validated and before
-// the block is read from disk: the wait is for the reply, so nothing is read
-// or buffered for bytes that are not about to go out.
+// The upload cap is checked after validation and before the disk read, so a
+// capped server never buffers bytes it is not about to send.
 func (s *Server) serveRequest(ctx context.Context, c *inbound, m wire.Message) error {
 	index := int(m.Index)
 	if index < 0 || index >= s.pieceCount {

@@ -17,13 +17,11 @@ import (
 	"torrent-client/internal/bencode"
 )
 
-// multiFileEntry is one entry of a multi-file torrent's `files` list.
 type multiFileEntry struct {
 	Length int64    `bencode:"length"`
 	Path   []string `bencode:"path"`
 }
 
-// multiFileInfo is the multi-file `info` dictionary shape.
 type multiFileInfo struct {
 	Name        string           `bencode:"name"`
 	PieceLength int64            `bencode:"piece length"`
@@ -31,8 +29,6 @@ type multiFileInfo struct {
 	Files       []multiFileEntry `bencode:"files"`
 }
 
-// fixtureFile is one file of the fixture tree, at a path relative to the
-// torrent's root directory.
 type fixtureFile struct {
 	path []string
 	data []byte
@@ -61,7 +57,6 @@ func sprintfHex(b [32]byte) string {
 	return string(out)
 }
 
-// devtrackerAddr reads the address the dev tracker printed.
 func devtrackerAddr(t *testing.T, p *process) string {
 	t.Helper()
 	line := p.waitForLine(t, "listening on", 20*time.Second)
@@ -73,8 +68,8 @@ func devtrackerAddr(t *testing.T, p *process) string {
 	return strings.TrimSpace(line[i+len(marker):])
 }
 
-// writeMultiFileTorrent builds a .torrent whose pieces span the CONCATENATED
-// bytes of every file, which is what makes file boundaries land mid-piece.
+// Pieces span the concatenated bytes of every file — that's what makes file
+// boundaries land mid-piece.
 func writeMultiFileTorrent(t *testing.T, path, announce, name string, pieceLength int64, files []fixtureFile) {
 	t.Helper()
 
@@ -111,8 +106,8 @@ func writeMultiFileTorrent(t *testing.T, path, announce, name string, pieceLengt
 	}
 }
 
-// materialise writes the fixture tree under root, so a seeder can serve it and
-// the downloaded tree can be compared against it.
+// materialise writes the fixture tree under root so the seeder has something to
+// serve and we have something to compare the download against.
 func materialise(t *testing.T, root string, files []fixtureFile) {
 	t.Helper()
 	for _, f := range files {
@@ -126,13 +121,12 @@ func materialise(t *testing.T, root string, files []fixtureFile) {
 	}
 }
 
-// TestEndToEndMultiFileDownload is the multi-file proof: a real directory tree,
-// seeded by cmd/seed and fetched by the real CLI over the wire, with every file
-// compared byte-for-byte afterwards.
+// The multi-file proof: a real directory tree, seeded by cmd/seed and fetched by
+// the real CLI over the wire, every file compared byte-for-byte afterwards.
 //
-// The sizes are chosen so the awkward cases are all present: the first file is
-// not a whole number of pieces, a boundary falls inside a piece, a file lives
-// one and two directories deep, and the final piece is short.
+// Sizes are picked so the awkward cases are all in play: the first file isn't a
+// whole number of pieces, a boundary falls mid-piece, files sit one and two
+// directories deep, and the last piece is short.
 func TestEndToEndMultiFileDownload(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end multi-file download skipped in -short mode")
@@ -158,8 +152,8 @@ func TestEndToEndMultiFileDownload(t *testing.T) {
 	torrentPath := filepath.Join(work, "bundle.torrent")
 	writeMultiFileTorrent(t, torrentPath, announceURL, "bundle", pieceLength, files)
 
-	// The seeder is handed the parent directory; the torrent's name becomes the
-	// root inside it, which is the same layout the client writes.
+	// The seeder gets the parent directory: the torrent's name becomes the root
+	// inside it, the same layout the client writes.
 	srcParent := filepath.Join(work, "src")
 	materialise(t, filepath.Join(srcParent, "bundle"), files)
 
@@ -190,10 +184,9 @@ func TestEndToEndMultiFileDownload(t *testing.T) {
 	}
 }
 
-// startMergedProcess is startProcess with stderr folded into the same pipe.
-// The fixture binaries announce readiness on stdout, but the CLIENT writes its
-// progress to stderr — the dashboard owns that stream — so a test that waits on
-// a client's log line has to read both.
+// startProcess with stderr folded into the same pipe: the fixture binaries
+// announce on stdout, the client logs progress on stderr — the dashboard owns
+// that stream — so a test waiting on a client's log line has to read both.
 func startMergedProcess(t *testing.T, name string, args ...string) *process {
 	t.Helper()
 	cmd := exec.Command(name, args...)
@@ -220,9 +213,8 @@ func startMergedProcess(t *testing.T, name string, args ...string) *process {
 	return &process{cmd: cmd, lines: lines}
 }
 
-// TestEndToEndMultiFileSeedsBackToAnotherClient proves the seed READ path walks
-// the same mapping as the write path: our client downloads the tree, keeps
-// seeding, and a second client fetches it with no other source present.
+// The seed read path has to walk the same mapping the write path built: download
+// the tree, keep seeding, then serve it to a second client with no other source.
 func TestEndToEndMultiFileSeedsBackToAnotherClient(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end multi-file seeding skipped in -short mode")
@@ -252,7 +244,7 @@ func TestEndToEndMultiFileSeedsBackToAnotherClient(t *testing.T) {
 	fixtureSeeder := startProcess(t, seedBin, torrentPath, srcParent)
 	fixtureSeeder.waitForLine(t, "seed: ready", 20*time.Second)
 
-	// A downloads the tree and keeps seeding it back.
+	// A downloads the tree, then keeps seeding it.
 	a := startMergedProcess(t, clientBin, "-seed", "-port", "7003", torrentPath, filepath.Join(t.TempDir(), "a"))
 	a.waitForLine(t, "engine: complete:", 90*time.Second)
 

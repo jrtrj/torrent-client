@@ -15,13 +15,10 @@ import (
 	"time"
 )
 
-// TestEndToEndMagnetDownload is the magnet proof. The client is handed nothing
-// but an info-hash and a tracker: it must find a peer, pull the info dictionary
-// over ut_metadata, check it against that hash, and only then download — with
-// the content landing byte-identical to what was seeded.
-//
-// No .torrent file exists anywhere near the path the client is given, so the
-// metadata can only have come off the wire.
+// The magnet proof: the client gets an info-hash and a tracker, nothing else.
+// Find a peer, pull the info dictionary over ut_metadata, check it against the
+// hash, then download. No .torrent file exists anywhere near the path it's
+// given, so the metadata can only have come off the wire.
 func TestEndToEndMagnetDownload(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end magnet download skipped in -short mode")
@@ -44,7 +41,7 @@ func TestEndToEndMagnetDownload(t *testing.T) {
 	infoBytes := writeTorrent(t, torrentPath, announceURL, "single.bin", pieceLength, payload)
 	infoHash := sha1.Sum(infoBytes)
 
-	// The swarm's only member, and our only source of both metadata and content.
+	// The swarm's only member, and our only source of metadata and content.
 	srcDir := filepath.Join(work, "src")
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -76,17 +73,15 @@ func TestEndToEndMagnetDownload(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("downloaded %d bytes, want the %d seeded bytes", len(got), len(payload))
 	}
-	// The log must show the metadata really came over the wire.
+	// And the log has to show the metadata really came over the wire.
 	if !strings.Contains(stderr.String(), "resolving magnet") {
 		t.Errorf("the client never reported resolving the magnet:\n%s", stderr.String())
 	}
 }
 
-// TestEndToEndMagnetDownloadFailsOnAnUnknownHash is the other half of the
-// proof: the info-hash is the only thing the client is told, so a hash that
-// matches nothing in the swarm must fail loudly instead of downloading
-// whatever it finds. Exiting 0 here would be the worst outcome — the user would
-// believe they had the file they asked for.
+// The other half of the proof: the info-hash is all the client knows, so a hash
+// matching nothing in the swarm has to fail loudly instead of downloading
+// whatever it stumbles on. Exit 0 here and the user believes they got their file.
 func TestEndToEndMagnetDownloadFailsOnAnUnknownHash(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end magnet download skipped in -short mode")
@@ -117,8 +112,8 @@ func TestEndToEndMagnetDownloadFailsOnAnUnknownHash(t *testing.T) {
 	seeder := startProcess(t, seedBin, torrentPath, srcDir)
 	seeder.waitForLine(t, "seed: ready", 20*time.Second)
 
-	// A hash nothing in the swarm has. It is well-formed, so only the hash
-	// check itself can catch it.
+	// Nothing in the swarm has this hash. It's well-formed, so only the hash check
+	// itself can catch it.
 	var bogus [20]byte
 	for i := range bogus {
 		bogus[i] = byte(i)

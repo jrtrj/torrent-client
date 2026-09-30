@@ -7,9 +7,8 @@ import (
 	"testing"
 )
 
-// runCapture runs the CLI in-process and returns the exit code plus both
-// streams, so the tests assert the observable contract (codes and output)
-// rather than internal state.
+// runCapture drives the CLI in-process and hands back the exit code plus both
+// streams — codes and output are the contract these tests care about.
 func runCapture(args ...string) (code int, stdout, stderr string) {
 	var out, errOut strings.Builder
 	code = run(args, &out, &errOut)
@@ -63,14 +62,14 @@ func TestTooManyArgumentsIsUsageError(t *testing.T) {
 	if !strings.Contains(stderr, "extra") {
 		t.Errorf("expected the offending argument in the message, got %q", stderr)
 	}
-	// "extra" is not a flag, so blaming flag ordering would be misleading.
+	// "extra" isn't a flag, so a flag-ordering hint here would be a lie.
 	if strings.Contains(stderr, "before the positional") {
 		t.Errorf("a non-flag extra argument should not blame flag ordering, got %q", stderr)
 	}
 }
 
-// A flag written after the positional arguments is a common mistake, because
-// the flag package stops parsing at the first non-flag argument.
+// Writing a flag after the positionals is the classic own-goal: flag stops
+// parsing at the first non-flag argument.
 func TestFlagAfterPositionalsIsUsageError(t *testing.T) {
 	code, _, stderr := runCapture("fixture.torrent", "out", "-seed")
 	if code != exitUsage {
@@ -115,8 +114,7 @@ func TestPortRange(t *testing.T) {
 	}
 	for _, port := range []string{"1", "6881", "65535"} {
 		t.Run("port="+port, func(t *testing.T) {
-			// Valid grammar: the pipeline is missing, so this is a fatal
-			// error rather than a usage error.
+			// Grammar's fine, the pipeline isn't: fatal, not usage.
 			if code, _, _ := runCapture("-port", port, "fixture.torrent", "out"); code != exitFatal {
 				t.Fatalf("exit = %d, want %d", code, exitFatal)
 			}
@@ -136,8 +134,7 @@ func TestBadRateIsUsageError(t *testing.T) {
 	}
 }
 
-// A well-formed invocation of a file that cannot be opened is a runtime
-// failure, not a usage error: the pipeline is implemented, so this exits 1.
+// Well-formed args, unopenable file: a runtime failure, so exit 1, not usage.
 func TestWellFormedInvocationWithMissingTorrentIsFatal(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "fixture.torrent")
 	code, stdout, stderr := runCapture(missing, "out/")
@@ -185,7 +182,7 @@ func TestParseRate(t *testing.T) {
 		{in: "2MB", wantErr: true},
 		{in: "abc", wantErr: true},
 		{in: "99999999999999999999", wantErr: true},
-		{in: "9223372036854775807G", wantErr: true}, // multiplication overflows
+		{in: "9223372036854775807G", wantErr: true}, // the 1G multiplier overflows int64
 	}
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
@@ -207,7 +204,7 @@ func TestParseRate(t *testing.T) {
 }
 
 func TestParseRateAcceptsMaxInt64(t *testing.T) {
-	// Exactly representable: MaxInt64 bytes with no suffix.
+	// MaxInt64 with no suffix: exactly representable.
 	got, err := parseRate("9223372036854775807")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

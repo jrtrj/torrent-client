@@ -26,10 +26,9 @@ import (
 	"torrent-client/internal/wire"
 )
 
-// TestEndToEndLoopbackDownload is the walking-skeleton proof: it builds the
-// three binaries, runs a dev tracker and a seeder against a fixture over
-// loopback, downloads the fixture with the real CLI, and requires the result
-// to be byte-identical to the source. No network access beyond 127.0.0.1.
+// The walking skeleton. Build the three binaries, run a dev tracker and a
+// seeder against a fixture over loopback, download it with the real CLI, and
+// require the result to match the source byte for byte. Nothing leaves 127.0.0.1.
 func TestEndToEndLoopbackDownload(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end download skipped in -short mode")
@@ -41,13 +40,13 @@ func TestEndToEndLoopbackDownload(t *testing.T) {
 	seedBin := buildBinary(t, root, binDir, "./cmd/seed")
 	clientBin := buildBinary(t, root, binDir, "./cmd/torrent-client")
 
-	// 1. Dev tracker on an OS-assigned port.
+	// Port 0: the OS picks, we read the number back out of the log.
 	devtracker := startProcess(t, devtrackerBin, "-addr", "127.0.0.1:0", "-interval", "2")
 	line := devtracker.waitForLine(t, "listening on", 20*time.Second)
 	addr := strings.TrimSpace(line[strings.Index(line, "listening on ")+len("listening on "):])
 	announceURL := "http://" + addr + "/announce"
 
-	// 2. Fixture: 700 KiB across three 256 KiB pieces.
+	// 700 KiB over three 256 KiB pieces, the last one short on purpose.
 	const pieceLength = 256 * 1024
 	payload := make([]byte, 700*1024)
 	if _, err := rand.Read(payload); err != nil {
@@ -61,9 +60,9 @@ func TestEndToEndLoopbackDownload(t *testing.T) {
 	torrentPath := filepath.Join(workDir, "payload.torrent")
 	infoBytes := writeTorrent(t, torrentPath, announceURL, "payload.bin", pieceLength, payload)
 
-	// The client's captured info-hash must equal an independent SHA-1 of the
-	// raw info bytes. Peers, the seeder, and the tracker would all reject a
-	// mismatch, but assert it directly so a failure says which layer broke.
+	// Check the captured info-hash against an independent SHA-1 of the raw info
+	// bytes. Every layer downstream would reject a mismatch anyway; doing it here
+	// means a failure says which one broke.
 	meta, err := metainfo.Load(torrentPath)
 	if err != nil {
 		t.Fatalf("metainfo.Load: %v", err)
@@ -75,11 +74,9 @@ func TestEndToEndLoopbackDownload(t *testing.T) {
 		t.Fatalf("fixture has %d pieces, want 3", meta.PieceCount())
 	}
 
-	// 3. Seeder for the fixture.
 	seeder := startProcess(t, seedBin, torrentPath, srcPath)
 	seeder.waitForLine(t, "seed: ready", 20*time.Second)
 
-	// 4. The real CLI downloads it.
 	outPath := filepath.Join(t.TempDir(), "downloaded.bin")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -92,7 +89,7 @@ func TestEndToEndLoopbackDownload(t *testing.T) {
 	}
 	t.Logf("client stderr:\n%s", stderr.String())
 
-	// 5. Byte-identical.
+	// Byte-identical, or the whole test is worth nothing.
 	got, err := os.ReadFile(outPath)
 	if err != nil {
 		t.Fatalf("read output: %v", err)
@@ -109,10 +106,9 @@ func TestEndToEndLoopbackDownload(t *testing.T) {
 	}
 }
 
-// TestEndToEndLoopbackDownloadOverUDP is the same walking skeleton over the
-// BEP 15 transport: the torrent announces to a udp:// URL, so both the real
-// CLI and the seeder have to speak the UDP protocol to find each other. It is
-// the only test that drives the scheme dispatcher through the real binary.
+// The same skeleton over BEP 15: the announce URL is udp://, so the CLI and the
+// seeder both have to speak UDP to find each other. This is the only test that
+// drives the scheme dispatcher through the real binary.
 func TestEndToEndLoopbackDownloadOverUDP(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end download skipped in -short mode")
@@ -124,14 +120,14 @@ func TestEndToEndLoopbackDownloadOverUDP(t *testing.T) {
 	seedBin := buildBinary(t, root, binDir, "./cmd/seed")
 	clientBin := buildBinary(t, root, binDir, "./cmd/torrent-client")
 
-	// 1. Dev tracker, whose UDP listener is what this test announces to.
+	// Dev tracker; its UDP listener is what this test announces to.
 	devtracker := startProcess(t, devtrackerBin, "-addr", "127.0.0.1:0", "-udp-addr", "127.0.0.1:0", "-interval", "2")
 	devtracker.waitForLine(t, "listening on", 20*time.Second)
 	udpLine := devtracker.waitForLine(t, "udp listening on", 20*time.Second)
 	udpAddr := strings.TrimSpace(udpLine[strings.Index(udpLine, "udp listening on ")+len("udp listening on "):])
 	announceURL := "udp://" + udpAddr + "/announce"
 
-	// 2. Fixture: 700 KiB across three 256 KiB pieces.
+	// 700 KiB over three 256 KiB pieces, the last one short on purpose.
 	const pieceLength = 256 * 1024
 	payload := make([]byte, 700*1024)
 	if _, err := rand.Read(payload); err != nil {
@@ -145,14 +141,13 @@ func TestEndToEndLoopbackDownloadOverUDP(t *testing.T) {
 	torrentPath := filepath.Join(workDir, "payload.torrent")
 	writeTorrent(t, torrentPath, announceURL, "payload.bin", pieceLength, payload)
 
-	// 3. The seeder announces over UDP as well, so the client can discover it.
-	// Reaching "ready" means its UDP announce was answered: the URL is a
-	// udp:// one, so nothing but the UDP transport could have served it.
+	// The seeder announces over UDP too, so the client can discover it. Reaching
+	// "ready" means its announce was answered — the URL is udp://, so only the UDP
+	// transport could have served it.
 	seeder := startProcess(t, seedBin, torrentPath, srcPath)
 	seeder.waitForLine(t, "seed: announced to udp://", 20*time.Second)
 	seeder.waitForLine(t, "seed: ready", 20*time.Second)
 
-	// 4. The real CLI downloads it.
 	outPath := filepath.Join(t.TempDir(), "downloaded.bin")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -165,8 +160,8 @@ func TestEndToEndLoopbackDownloadOverUDP(t *testing.T) {
 	}
 	t.Logf("client stderr:\n%s", stderr.String())
 
-	// 5. Byte-identical. The file can only have come from the peer the UDP
-	// tracker handed out, so this is the transport's end-to-end proof.
+	// Byte-identical, and the bytes can only have come from the peer the UDP
+	// tracker handed out: that's the transport's end-to-end proof.
 	got, err := os.ReadFile(outPath)
 	if err != nil {
 		t.Fatalf("read output: %v", err)
@@ -256,7 +251,6 @@ func (p *process) waitForLine(t *testing.T, substr string, timeout time.Duration
 	}
 }
 
-// fixtureInfo is the single-file info dictionary the test fixture uses.
 type fixtureInfo struct {
 	Length      int64  `bencode:"length"`
 	Name        string `bencode:"name"`
@@ -264,10 +258,9 @@ type fixtureInfo struct {
 	Pieces      []byte `bencode:"pieces"`
 }
 
-// writeTorrent builds a single-file .torrent for data and returns the raw
-// info-dictionary bytes, so the caller can hash them independently. The info
-// bytes are embedded verbatim as a RawMessage: re-encoding them must never
-// happen, which is the whole point of the raw capture.
+// writeTorrent builds a single-file .torrent and returns the raw info-dict bytes
+// so the caller can hash them independently. They go in as a RawMessage and are
+// never re-encoded — that's the whole point of keeping the raw capture.
 func writeTorrent(t *testing.T, path, announce, name string, pieceLength int64, data []byte) []byte {
 	t.Helper()
 
@@ -307,12 +300,10 @@ func marshalBencode(t *testing.T, v any) []byte {
 	return buf.Bytes()
 }
 
-// TestEndToEndConcurrentPeers proves the client spreads one download across
-// more than one seeder at the same time. Both seeders log every block they
-// serve with a timestamp, so the test can show the two serving windows
-// overlap; the client's own statistics report the peak number of peers with
-// work in the request pipeline. No block may be fetched twice, which is what a
-// duplicated-work scheduler bug would produce.
+// One download, more than one seeder pulling at once. Both seeders timestamp
+// every block they serve, so the test can show the serving windows overlap, and
+// the client's own stats report the peak peers with work in the pipeline. No
+// block may be fetched twice — that's what a duplicated-work bug looks like.
 func TestEndToEndConcurrentPeers(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end download skipped in -short mode")
@@ -352,8 +343,8 @@ func TestEndToEndConcurrentPeers(t *testing.T) {
 		wantBlocks += int((meta.PieceSize(i) + wire.BlockSize - 1) / wire.BlockSize)
 	}
 
-	// A per-block delay keeps requests outstanding on both connections, so a
-	// client that used one seeder at a time would show two disjoint windows.
+	// The per-block delay keeps requests outstanding on both connections: a client
+	// that worked one seeder at a time would show two disjoint windows.
 	const serveDelay = 15 * time.Millisecond
 	seederA := startRecorded(t, seedBin, "-serve-delay", serveDelay.String(), torrentPath, srcPath)
 	seederB := startRecorded(t, seedBin, "-serve-delay", serveDelay.String(), torrentPath, srcPath)
@@ -381,7 +372,7 @@ func TestEndToEndConcurrentPeers(t *testing.T) {
 			len(got), sha256.Sum256(got), len(payload), sha256.Sum256(payload))
 	}
 
-	// 1. Both seeders served part of the download.
+	// Both seeders did real work.
 	aServed := seederA.parseServed(t)
 	bServed := seederB.parseServed(t)
 	if len(aServed) == 0 || len(bServed) == 0 {
@@ -389,7 +380,7 @@ func TestEndToEndConcurrentPeers(t *testing.T) {
 	}
 	t.Logf("seeder A served %d blocks, seeder B served %d blocks", len(aServed), len(bServed))
 
-	// 2. No block was fetched twice, and the swarm covered every block.
+	// No block fetched twice, and the two of them covered everything.
 	counts := make(map[[2]uint32]int)
 	for _, b := range append(append([]servedBlock{}, aServed...), bServed...) {
 		counts[b.key]++
@@ -403,7 +394,8 @@ func TestEndToEndConcurrentPeers(t *testing.T) {
 		}
 	}
 
-	// 3. The serving windows overlap, i.e. both seeders were busy at once.
+	// The serving windows overlap: both seeders were busy at once. Timing asserts
+	// like this are a pain in the ass, but there's no other way to see it.
 	aFirst, aLast := seederA.span(t, "seed: served")
 	bFirst, bLast := seederB.span(t, "seed: served")
 	overlapStart := aFirst
@@ -421,8 +413,7 @@ func TestEndToEndConcurrentPeers(t *testing.T) {
 	}
 	t.Logf("serving windows overlap for %s", overlapEnd.Sub(overlapStart))
 
-	// 4. The client's own statistics agree that more than one peer worked at
-	// the same time.
+	// The client's own stats agree that more than one peer worked at once.
 	if used := grepInt(t, stderr.String(), "peers used"); used < 2 {
 		t.Fatalf("client reported %d peer(s) used, want at least 2", used)
 	}
@@ -431,7 +422,6 @@ func TestEndToEndConcurrentPeers(t *testing.T) {
 	}
 }
 
-// servedBlock is one block a seeder answered.
 type servedBlock struct {
 	key [2]uint32 // piece, begin
 }
@@ -441,8 +431,8 @@ type stampedLine struct {
 	text string
 }
 
-// lineLog keeps a timestamped copy of a helper process's stdout, so the test
-// can reason about when the process was doing work.
+// lineLog keeps a timestamped copy of a helper process's stdout, so a test can
+// reason about when it was doing work.
 type lineLog struct {
 	mu    sync.Mutex
 	lines []stampedLine
@@ -460,8 +450,8 @@ func (l *lineLog) snapshot() []stampedLine {
 	return append([]stampedLine(nil), l.lines...)
 }
 
-// recordedProcess is startProcess plus a drain that timestamps every line.
-// Use its waitFor/span rather than waitForLine: the drain consumes the channel.
+// startProcess plus a drain that timestamps every line. Use waitFor/span here,
+// not waitForLine — the drain owns the channel.
 type recordedProcess struct {
 	*process
 	log *lineLog
@@ -515,7 +505,6 @@ func (r *recordedProcess) parseServed(t *testing.T) []servedBlock {
 	return out
 }
 
-// span returns the first and last time a line matching substr was seen.
 func (r *recordedProcess) span(t *testing.T, substr string) (time.Time, time.Time) {
 	t.Helper()
 	var first, last time.Time
@@ -534,7 +523,8 @@ func (r *recordedProcess) span(t *testing.T, substr string) (time.Time, time.Tim
 	return first, last
 }
 
-// grepInt reads the first decimal number that follows label in text.
+// grepInt scrapes the first decimal after label out of the client's log. There's
+// no machine-readable output to speak of, so we read stderr like animals.
 func grepInt(t *testing.T, text, label string) int {
 	t.Helper()
 	i := strings.Index(text, label)
@@ -556,9 +546,8 @@ func grepInt(t *testing.T, text, label string) int {
 	return n
 }
 
-// freePort reserves a TCP port and releases it, so the next binder can use the
-// number. It is how the seeding client is given the concrete port it must
-// announce; the CLI rejects 0 as a usage error, so a real port is required.
+// freePort reserves a TCP port and hands the number back. The CLI rejects
+// -port 0 outright, so the seeding client needs a real port to announce.
 func freePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -569,8 +558,8 @@ func freePort(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-// clientProc is the real CLI left running in the background with its stderr
-// streamed, so a test can assert on what it logged while it was alive.
+// clientProc is the real CLI left running with its stderr streamed, so a test
+// can assert on what it logged while it was alive.
 type clientProc struct {
 	cmd   *exec.Cmd
 	lines *lineLog
@@ -626,8 +615,8 @@ func (p *clientProc) waitFor(t *testing.T, substr string, timeout time.Duration)
 	}
 }
 
-// wait blocks until the drain has seen EOF (the process has exited) and then
-// reaps it, in the order StderrPipe requires.
+// wait blocks until the drain hits EOF (the process is gone) and then reaps it,
+// in the order StderrPipe insists on.
 func (p *clientProc) wait() error {
 	p.once.Do(func() {
 		<-p.drain
@@ -636,7 +625,6 @@ func (p *clientProc) wait() error {
 	return p.werr
 }
 
-// waitExit requires the process to exit within timeout, then reaps it.
 func (p *clientProc) waitExit(t *testing.T, timeout time.Duration) error {
 	t.Helper()
 	select {
@@ -647,7 +635,6 @@ func (p *clientProc) waitExit(t *testing.T, timeout time.Duration) error {
 	return p.wait()
 }
 
-// countLines is how many streamed lines contain substr.
 func (p *clientProc) countLines(substr string) int {
 	n := 0
 	for _, l := range p.lines.snapshot() {
@@ -667,7 +654,6 @@ func (p *clientProc) logText() string {
 	return b.String()
 }
 
-// assertFileEquals requires path to hold exactly want.
 func assertFileEquals(t *testing.T, path string, want []byte) {
 	t.Helper()
 	got, err := os.ReadFile(path)
@@ -680,8 +666,8 @@ func assertFileEquals(t *testing.T, path string, want []byte) {
 	}
 }
 
-// trackerMaxUploaded is the highest uploaded= counter the dev tracker has
-// logged so far; the dev tracker prints one line per announce.
+// trackerMaxUploaded is the high-water mark of the uploaded= counter in the dev
+// tracker's log; it prints one line per announce.
 func trackerMaxUploaded(p *recordedProcess) int64 {
 	var max int64
 	for _, l := range p.log.snapshot() {
@@ -704,13 +690,11 @@ func trackerMaxUploaded(p *recordedProcess) int64 {
 	return max
 }
 
-// TestEndToEndSeedingServesSecondClient is the upload proof. Client A starts
-// with -seed and downloads the fixture, keeping its listener up. The fixture
-// seeder is then stopped, so the only source left is A. A second client B
-// downloads the same torrent and must end up byte-identical, which is only
-// possible if A served it. The test also requires A to log served blocks, the
-// first client to have stayed alive after completing, and the dev tracker to
-// see A's uploaded counter move.
+// The upload proof. A downloads the fixture with -seed and keeps its listener
+// up; then the fixture seeder is stopped, leaving A as the only source. B pulls
+// the same torrent and has to land byte-identical, which can only happen if A
+// served it. We also want A logging served blocks and the tracker watching A's
+// uploaded counter move.
 func TestEndToEndSeedingServesSecondClient(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end seeding skipped in -short mode")
@@ -749,12 +733,12 @@ func TestEndToEndSeedingServesSecondClient(t *testing.T) {
 	}
 
 	// The fixture seeder. A per-block delay widens A's download window, so A's
-	// listener is genuinely up while A is still fetching.
+	// listener is up and serving while A is still fetching.
 	fixture := startRecorded(t, seedBin, "-serve-delay", "10ms", torrentPath, srcPath)
 	fixture.waitFor(t, "seed: ready", 20*time.Second)
 
-	// A downloads and then keeps seeding. It must bind the port it announces,
-	// so it is given a concrete free port (the CLI rejects -port 0).
+	// A downloads, then keeps seeding: it has to bind the port it announces, and
+	// -port 0 is a usage error, so hand it a concrete free one.
 	port := freePort(t)
 	outA := filepath.Join(t.TempDir(), "A.bin")
 	a := startClient(t, clientBin, "-seed", "-port", strconv.Itoa(port), torrentPath, outA)
@@ -767,7 +751,7 @@ func TestEndToEndSeedingServesSecondClient(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// B downloads the same torrent. Without A's upload path this cannot work.
+	// B pulls the same torrent. Without A's upload path it can't possibly work.
 	outB := filepath.Join(t.TempDir(), "B.bin")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -787,7 +771,7 @@ func TestEndToEndSeedingServesSecondClient(t *testing.T) {
 		t.Logf("seeding client served %d blocks", served)
 	}
 
-	// The tracker saw A's uploaded counter move: poll because the client
+	// Poll for the tracker seeing A's uploaded counter move — the client only
 	// re-announces on the tracker's interval.
 	deadline := time.Now().Add(20 * time.Second)
 	var uploaded int64
@@ -803,7 +787,7 @@ func TestEndToEndSeedingServesSecondClient(t *testing.T) {
 	}
 	t.Logf("tracker saw uploaded=%d bytes from the swarm", uploaded)
 
-	// Ctrl-C while seeding is a clean exit, not a fatal one, and the client
+	// Ctrl-C while seeding must be a clean exit, not a fatal one, and the client
 	// announces stopped on the way out.
 	if err := a.cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatalf("interrupt seeding client: %v", err)
@@ -825,9 +809,8 @@ func (r *recordedProcess) logText() string {
 	return b.String()
 }
 
-// resumeFixture is a loopback swarm whose seeder is slow enough to interrupt a
-// download after the first piece verifies. The content is eight 64 KiB pieces,
-// so plenty of work remains after the interrupt.
+// A loopback swarm whose seeder is slow enough to interrupt after the first
+// piece verifies. Eight 64 KiB pieces leave plenty of work behind the interrupt.
 type resumeFixture struct {
 	clientBin   string
 	torrentPath string
@@ -871,8 +854,8 @@ func startResumeFixture(t *testing.T) *resumeFixture {
 		t.Fatalf("metainfo.Load: %v", err)
 	}
 
-	// A per-block delay widens the transfer so it can be killed after the
-	// first piece verifies but well before the last.
+	// Slow the transfer enough to be killed after the first piece verifies and
+	// well before the last.
 	seeder := startRecorded(t, seedBin, "-serve-delay", "25ms", torrentPath, srcPath)
 	seeder.waitFor(t, "seed: ready", 20*time.Second)
 
@@ -891,9 +874,9 @@ func startResumeFixture(t *testing.T) *resumeFixture {
 	}
 }
 
-// waitForResume polls until the sidecar records at least one verified piece and
-// returns that set. The sidecar is written after each verified piece, so its
-// appearance also proves an unclean kill would keep that piece.
+// Poll until the sidecar records a verified piece and return that set. It's
+// written after each verified piece, so seeing it also means an unclean kill
+// would keep that piece.
 func waitForResume(t *testing.T, store *state.Store, timeout time.Duration) map[int]bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -916,8 +899,8 @@ func waitForResume(t *testing.T, store *state.Store, timeout time.Duration) map[
 	return nil
 }
 
-// killAfterFirstPiece waits for the first verified piece and the sidecar that
-// records it, then SIGKILLs the client so it gets no chance to flush anything.
+// Wait for the first verified piece and the sidecar recording it, then SIGKILL
+// the client: no chance to flush anything, which is the whole damn point.
 func (f *resumeFixture) killAfterFirstPiece(t *testing.T, c *clientProc) map[int]bool {
 	t.Helper()
 	c.waitFor(t, "verified (", 60*time.Second)
@@ -929,8 +912,7 @@ func (f *resumeFixture) killAfterFirstPiece(t *testing.T, c *clientProc) map[int
 	return held
 }
 
-// runToCompletion runs a second client against the same torrent and output and
-// returns its stderr.
+// A second client against the same torrent and output; returns its stderr.
 func (f *resumeFixture) runToCompletion(t *testing.T) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -944,8 +926,8 @@ func (f *resumeFixture) runToCompletion(t *testing.T) string {
 	return stderr.String()
 }
 
-// servedCounts maps each (piece, begin) the seeder answered to how many times
-// it answered it, across every run in the test.
+// servedCounts maps each (piece, begin) the seeder answered to how many times it
+// answered it, across every run in the test.
 func (f *resumeFixture) servedCounts(t *testing.T) map[[2]uint32]int {
 	t.Helper()
 	counts := make(map[[2]uint32]int)
@@ -963,10 +945,9 @@ func totalBlocks(meta *metainfo.MetaInfo) int {
 	return n
 }
 
-// TestEndToEndResumeAfterSIGKILL kills a real download mid-transfer, restarts
-// it, and proves both halves of resume: the output is byte-identical, and no
-// block of a piece the sidecar had already verified was served a second time —
-// the seeder's own block log is the evidence, not the client's word.
+// Kill a real download mid-transfer, restart it, prove both halves of resume:
+// output byte-identical, and no block of an already-verified piece served twice.
+// The seeder's block log is the evidence here, not the client's word.
 func TestEndToEndResumeAfterSIGKILL(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end resume skipped in -short mode")
@@ -1012,10 +993,9 @@ func TestEndToEndResumeAfterSIGKILL(t *testing.T) {
 	}
 }
 
-// TestEndToEndResumeRefetchesTamperedPiece corrupts a verified piece on disk
-// after the kill while the sidecar still claims it. The resumed run must re-hash
-// what is on disk, reject the claim, re-fetch the piece, and still end
-// byte-identical: verify-then-trust, never blind trust.
+// Corrupt a verified piece on disk after the kill while the sidecar still claims
+// it. The resumed run has to re-hash what's on disk, reject the claim, re-fetch
+// the piece, and still land byte-identical: verify then trust, never blind trust.
 func TestEndToEndResumeRefetchesTamperedPiece(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end resume skipped in -short mode")
@@ -1065,9 +1045,8 @@ func TestEndToEndResumeRefetchesTamperedPiece(t *testing.T) {
 	}
 }
 
-// TestEndToEndCleanShutdownFlushesAndAnnouncesStopped sends SIGINT to a live
-// download: the client must flush resume state, exit cleanly, and announce
-// stopped to the tracker within its bounded deadline.
+// SIGINT a live download: flush the resume state, exit cleanly, and announce
+// stopped to the tracker inside its deadline.
 func TestEndToEndCleanShutdownFlushesAndAnnouncesStopped(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end resume skipped in -short mode")
@@ -1108,11 +1087,10 @@ func TestEndToEndCleanShutdownFlushesAndAnnouncesStopped(t *testing.T) {
 	t.Fatalf("the dev tracker never saw a stopped announce:\n%s", f.devtracker.logText())
 }
 
-// TestEndToEndRateLimitIsEnforced is the flag-wiring proof: the caps reach the
-// wiring, not just the argument parser. Client A downloads the fixture with a
-// download cap and asserts the whole transfer was paced at that cap; A then
-// seeds with an upload cap, the fixture seeder is stopped, and client B must
-// fetch the same content from A at A's upload cap rather than at wire speed.
+// The flag-wiring proof: the caps have to reach the wiring, not stop at the
+// argument parser. A downloads the fixture under a down cap and the whole
+// transfer has to be paced at it; then A seeds under an up cap with the fixture
+// gone, and B must fetch from A at A's cap instead of at wire speed.
 func TestEndToEndRateLimitIsEnforced(t *testing.T) {
 	if testing.Short() {
 		t.Skip("end-to-end download skipped in -short mode")
@@ -1163,8 +1141,8 @@ func TestEndToEndRateLimitIsEnforced(t *testing.T) {
 		t.Fatalf("the client did not report the upload cap;\nlog:\n%s", log)
 	}
 
-	// Both directions of the band: ignoring the cap would finish in well under
-	// a second, stalling would never finish at all.
+	// Both edges of the band: ignoring the cap finishes in well under a second,
+	// stalling never finishes at all.
 	got := float64(len(payload)) / downloadElapsed.Seconds()
 	if got > 1.5*float64(downCap) {
 		t.Fatalf("download ran at %.0f B/s over %s, want no more than 1.5x the %d B/s cap",
