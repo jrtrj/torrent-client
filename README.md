@@ -16,8 +16,11 @@ resuming, the live dashboard, client-side seeding, UDP trackers, and rate limiti
 
 ## Artifacts
 
-- **Map** — https://github.com/jrtrj/torrent-client/issues/<map-issue> (label `wayfinder:map`)
-- **Build spec** — `docs/build-spec.md` (written when the map closes)
+- **Map** — [#1](https://github.com/jrtrj/torrent-client/issues/1) (label `wayfinder:map`)
+- **Build spec** — [#15](https://github.com/jrtrj/torrent-client/issues/15) — the current synthesis;
+  `docs/build-spec.md` supersedes it when the map closes
+- **Build tickets** — [#16–#26](https://github.com/jrtrj/torrent-client/issues?q=is%3Aissue+label%3Aready-for-agent)
+  (label `ready-for-agent`)
 
 ## Build and run
 
